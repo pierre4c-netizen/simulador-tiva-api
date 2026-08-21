@@ -114,6 +114,19 @@ class FarmacoMatematica:
         i_post = i_pre * (1.0 - (num_remi / den_remi))
         term = (target_prob / (1.0 - target_prob)) ** (1.0 / gamma_prop)
         return (c50_prop * i_post) * term
+        
+    @staticmethod
+    def bouillon_2004_bis_iso_cprop(c_remi, target_bis):
+        e0, emax, c50_prop, c50_remi, gamma = 97.4, 97.4, 4.47, 19.3, 1.43
+        if target_bis <= (e0 - emax) or target_bis >= e0: return np.full_like(c_remi, np.nan) if isinstance(c_remi, np.ndarray) else np.nan
+        effect_ratio = (e0 - target_bis) / emax
+        u_req = (effect_ratio / (1.0 - effect_ratio)) ** (1.0 / gamma)
+        c_remi_safe = np.clip(c_remi, 0.0, None) if isinstance(c_remi, np.ndarray) else max(0.0, c_remi)
+        c_prop = c50_prop * (u_req - (c_remi_safe / c50_remi))
+        if isinstance(c_prop, np.ndarray): c_prop[c_prop < 0] = np.nan
+        else: 
+            if c_prop < 0: return np.nan
+        return c_prop
 
     @staticmethod
     def kazama_1998_iso_cprop(c_fent, target_prob, efecto):
@@ -159,7 +172,7 @@ def get_pk_params(farmaco, modelo_pk, ke0_tpeak_str, peso, altura, sexo, edad):
         else: V1, V2, V3 = 12.7, 50.7, 274.0; Cl1, Cl2, Cl3 = 0.574, 4.01, 1.95
         
         k10, k12, k21, k13, k31 = Cl1/V1, Cl2/V1, Cl2/V2, Cl3/V1, Cl3/V3
-        if 'Pediatría' in modelo_pk: ke0 = 0.0
+        if 'Pediátrico' in modelo_pk: ke0 = 0.0
         elif '0.108' in ke0_tpeak_str: ke0 = 0.108
         elif '0.105' in ke0_tpeak_str: ke0 = 0.105
         elif '4 min' in ke0_tpeak_str:
@@ -289,10 +302,12 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
         else: # Remifentanilo Isobolas
             for e in ['Laringoscopia', 'LOC']:
                 isobolas[f"propofol_bouillon_{e.lower()[:3]}"] = {'ce_50': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.50, e)), 'ce_95': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.95, e))}
-            
+            isobolas["propofol_bouillon_bis"] = {'ce_50': clean_arr(FarmacoMatematica.bouillon_2004_bis_iso_cprop(ce_y, 60.0)), 'ce_95': clean_arr(FarmacoMatematica.bouillon_2004_bis_iso_cprop(ce_y, 40.0))}
+
             p_greco = {'propofol_kern_lar': (5.60, 48.9, 33.2, 2.2, False), 'propofol_kern_mec': (4.16, 8.84, 8.2, 8.3, False), 'propofol_kern_elec': (4.56, 21.3, 14.7, 6.0, False), 'propofol_johnson_moaa_1': (2.2, 33.1, 3.6, 5.0, False), 'propofol_johnson_moaa_2': (1.3, 10.5, 2.8, 3.5, True), 'propofol_kern_moaa_3': (1.8, 12.5, 5.1, 5.8, False), 'propofol_kern_moaa_4': (1.8, 12.5, 5.1, 5.8, True), 'sevo_johnson_moaa_1': (0.74, 50.9, 9.4, 5.2, False), 'sevo_johnson_moaa_2': (0.74, 50.9, 9.4, 5.2, True), 'sevo_johnson_algo_30': (0.83, 1.3, 0.9, 2.7, False)}
             for k, v in p_greco.items(): isobolas[k] = {'ce_50': clean_arr(FarmacoMatematica.greco_iso_cs(ce_y, v[0], v[1], v[2], v[3], 0.50, v[4])), 'ce_95': clean_arr(FarmacoMatematica.greco_iso_cs(ce_y, v[0], v[1], v[2], v[3], 0.95, v[4]))}
-            
+            isobolas["sevo_manyam_bis"] = {'ce_50': clean_arr(FarmacoMatematica.greco_iso_cs(ce_y, 2.37, 38.02, 0.52, 1.12, 0.60, True)), 'ce_95': clean_arr(FarmacoMatematica.greco_iso_cs(ce_y, 2.37, 38.02, 0.52, 1.12, 0.40, True))}
+
             p_man = {'sevo_manyam_moaa_1': (7.30, 7.84, 0.23, 3.94), 'sevo_manyam_moaa_4': (4.19, 4.25, 0.28, 0.58), 'sevo_manyam_mec': (3.82, 2.43, 0.54, 1.27), 'sevo_manyam_term': (3.38, 1.32, 0.55, 3.47), 'sevo_manyam_elec': (3.27, 0.97, 0.088, 1.09), 'sevo_manyam_lar': (3.70, 2.36, 0.54, 1.22)}
             for k, v in p_man.items(): isobolas[k] = {'ce_50': clean_arr(FarmacoMatematica.manyam_iso_cs(ce_y, v[0], v[1], v[2], v[3], 0.50)), 'ce_95': clean_arr(FarmacoMatematica.manyam_iso_cs(ce_y, v[0], v[1], v[2], v[3], 0.95))}
 
