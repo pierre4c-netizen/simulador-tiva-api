@@ -1,11 +1,11 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Union
 import numpy as np
 from scipy.integrate import odeint
 from scipy.optimize import root_scalar
 
-# 1. Definición de las estructuras de entrada
+# 1. ESTRUCTURAS DE ENTRADA
 class EventoTIVA(BaseModel):
     tipo: str
     ini_min: float
@@ -13,6 +13,7 @@ class EventoTIVA(BaseModel):
     tasa_ug_min: float
 
 class PeticionSimulacion(BaseModel):
+    farmaco: str = "Fentanilo"
     peso_kg: float
     altura_cm: float
     edad_anos: float
@@ -20,215 +21,286 @@ class PeticionSimulacion(BaseModel):
     modelo_pk: str
     ke0_tpeak: str
     eventos: List[EventoTIVA]
-    minutos_simulacion: int = 1440 # Capacidad máxima de 24h
+    minutos_simulacion: int = 1440
 
-app = FastAPI(title="Motor TIVA Analítico Avanzado Completo")
+app = FastAPI(title="TIVA Flow API Motor Matemático")
 
-# 2. Funciones Matemáticas Puras
-def calcular_ke0_para_tpeak(k10, k12, k21, k13, k31, target_tpeak):
-    a = k10 + k12 + k13 + k21 + k31
-    b = k10*(k21+k31) + k12*k31 + k13*k21 + k21*k31
-    c = k10*k21*k31
-    roots = np.roots([1, a, b, c])
-    lambdas = sorted(-np.real(roots[np.isreal(roots)]), reverse=True)
-    if len(lambdas) < 3: return 0.147 
-    l1, l2, l3 = lambdas[:3]
-    A = (k21 - l1) * (k31 - l1) / ((l2 - l1) * (l3 - l1))
-    B = (k21 - l2) * (k31 - l2) / ((l1 - l2) * (l3 - l2))
-    C_coeff = (k21 - l3) * (k31 - l3) / ((l1 - l3) * (l2 - l3))
-    def get_term(l, ke, t): return t * np.exp(-ke * t) if abs(ke - l) < 1e-6 else (np.exp(-l * t) - np.exp(-ke * t)) / (ke - l)
-    def objective(ke):
-        Cp_t = A * np.exp(-l1 * target_tpeak) + B * np.exp(-l2 * target_tpeak) + C_coeff * np.exp(-l3 * target_tpeak)
-        Ce_t = ke * (A * get_term(l1, ke, target_tpeak) + B * get_term(l2, ke, target_tpeak) + C_coeff * get_term(l3, ke, target_tpeak))
-        return Cp_t - Ce_t
-    try: res = root_scalar(objective, bracket=[0.001, 3.0], method='brentq'); return res.root
-    except Exception: return 0.147 
+# 2. CLASE MATEMÁTICA PURA (Farmacodinamia e Isobolas)
+class FarmacoMatematica:
+    @staticmethod
+    def hill(c, c50, gamma, e0=0.0, emax=100.0):
+        return e0 + (emax - e0) * (c**gamma) / (c50**gamma + c**gamma)
 
-def get_pk_params(modelo_pk, ke0_tpeak_str, peso, altura, sexo, edad_paciente):
-    if modelo_pk == 'Scott 1987 (Fijo)': V1, V2, V3 = 12.7, 50.7, 274.0; Cl1, Cl2, Cl3 = 0.574, 4.01, 1.95
-    elif modelo_pk == 'Shafer 1990 (Fijo)': V1, V2, V3 = 6.09, 28.1, 228.0; Cl1, Cl2, Cl3 = 0.504, 2.87, 1.37
-    elif modelo_pk == 'Shafer 1990 (Peso)': V1, V2, V3 = 0.105 * peso, 0.446 * peso, 3.37 * peso; Cl1, Cl2, Cl3 = 0.00838 * peso, 0.0474 * peso, 0.0199 * peso
-    elif modelo_pk == 'Bae 2020 (Alométrico)':
-        f_vol, f_cl = (peso / 70.0) ** 1.23, (peso / 70.0) ** 0.313  
-        V1, V2, V3 = 10.1 * f_vol, 26.5 * f_vol, 206.0 * f_vol; Cl1, Cl2, Cl3 = 0.704 * f_cl, 2.38 * f_cl, 1.49 * f_cl
-    elif modelo_pk == 'Ginsberg 1996 (Pediatría, Peso y Edad)':
-        V1, V2, V3 = max(0.001, 0.43 * (peso - 19.8) + 5.8), max(0.001, 6.2 * (edad_paciente - 6.4) + 34.4), 0.0
-        Cl1, Cl2, Cl3 = max(0.001, 0.01 * (peso - 19.8) + 0.35), max(0.001, 0.82), 0.0
-    elif modelo_pk == 'Maharaj 2019 (Pediatría, Alométrico)':
-        V1, V2, V3 = 10.8 * (peso / 70.0), 417.0 * (peso / 70.0), 0.0
-        Cl1, Cl2, Cl3 = (32.5 / 60.0) * ((peso / 70.0) ** 0.75), (104.0 / 60.0) * ((peso / 70.0) ** 0.75), 0.0
-    elif modelo_pk == 'Okada 2024 (Pediatría, Alométrico)':
-        altura_m = altura / 100.0; bmi = peso / (altura_m ** 2) if altura_m > 0 else 20.0
-        if sexo == 'Masculino': m3 = (9270.0 * peso) / (6680.0 + 216.0 * bmi); a_mat, A50, c_mat = 0.88, 13.4, 12.7
-        else: m3 = (9270.0 * peso) / (8780.0 + 244.0 * bmi); a_mat, A50, c_mat = 1.11, 7.1, 1.1
-        mf = a_mat + ((1.0 - a_mat) * (edad_paciente / A50)**c_mat) / (1.0 + (edad_paciente / A50)**c_mat)
-        ffm = mf * m3; V1, V2, V3 = 0.024 * (ffm ** 0.64), 0.30, 11.0; Cl1, Cl2, Cl3 = 0.037 * (peso ** 0.46), 0.021, 0.066
-    else: V1, V2, V3 = 12.7, 50.7, 274.0; Cl1, Cl2, Cl3 = 0.574, 4.01, 1.95 # Fallback
-    
-    k10 = Cl1/V1 if V1>0 else 0; k12 = Cl2/V1 if V1>0 else 0; k21 = Cl2/V2 if V2>0 else 0; k13 = Cl3/V1 if V1>0 else 0; k31 = Cl3/V3 if V3>0 else 0
-    if 'Pediatría' in modelo_pk: ke0 = 0.0
-    else:
-        if ke0_tpeak_str == 'Ke0 0.147': ke0 = 0.147
-        elif ke0_tpeak_str == 'Ke0 0.108': ke0 = 0.108
-        elif ke0_tpeak_str == 'Ke0 0.105': ke0 = 0.105
-        elif ke0_tpeak_str == 'Tpeak 4 min': ke0 = calcular_ke0_para_tpeak(k10, k12, k21, k13, k31, 4.0)
+    @staticmethod
+    def greco_prob(cs, cr, ec_s, ec_r, alpha, n, invert=False, as_percent=True):
+        u = (cs/ec_s) + (cr/ec_r) + alpha * (cs/ec_s) * (cr/ec_r)
+        p = (u**n) / (u**n + 1.0)
+        if invert: p = 1.0 - p
+        return p * 100.0 if as_percent else p
+
+    @staticmethod
+    def greco_iso_cs(cr, ec_s, ec_r, alpha, n, target_prob, invert=False):
+        p = 1.0 - target_prob if invert else target_prob
+        if p <= 0 or p >= 1: return np.full_like(cr, np.nan) if isinstance(cr, np.ndarray) else np.nan
+        k = (p / (1.0 - p))**(1.0/n)
+        den = 1.0 + alpha * (cr/ec_r)
+        cs = ec_s * (k - cr/ec_r) / den
+        if isinstance(cs, np.ndarray):
+            cs[cs < 0] = np.nan
+            cs[den == 0] = np.nan
+        else:
+            if cs < 0 or den == 0: return np.nan
+        return cs
+
+    @staticmethod
+    def manyam_prob(cs, cr, b0, b1, b2, b3, as_percent=True):
+        x = b0 - b1*cs - b2*cr - b3*cs*cr
+        p = 1.0 / (1.0 + np.exp(x))
+        return p * 100.0 if as_percent else p
+
+    @staticmethod
+    def manyam_iso_cs(cr, b0, b1, b2, b3, target_prob):
+        if target_prob <= 0 or target_prob >= 1: return np.full_like(cr, np.nan) if isinstance(cr, np.ndarray) else np.nan
+        logit_term = np.log((1.0 - target_prob) / target_prob)
+        den = b1 + b3*cr
+        cs = (b0 - b2*cr - logit_term) / den
+        if isinstance(cs, np.ndarray):
+            cs[cs < 0] = np.nan
+            cs[den == 0] = np.nan
+        else:
+            if cs < 0 or den == 0: return np.nan
+        return cs
+
+    @staticmethod
+    def vereecke_prob(cs, cr, c50_s, c50_f, gamma_o, gamma, as_percent=True):
+        u = (cs/c50_s) * (1.0 + (cr/c50_f)**gamma_o)
+        p = (u**gamma) / (1.0 + u**gamma)
+        return p * 100.0 if as_percent else p
+
+    @staticmethod
+    def vereecke_iso_cs(cr, c50_s, c50_f, gamma_o, gamma, target_prob):
+        if target_prob <= 0 or target_prob >= 1: return np.full_like(cr, np.nan) if isinstance(cr, np.ndarray) else np.nan
+        u_req = (target_prob / (1.0 - target_prob))**(1.0/gamma)
+        return u_req * c50_s / (1.0 + (cr/c50_f)**gamma_o)
+
+    @staticmethod
+    def wang_2026_iso_cm(cf, c50_m, target_prob):
+        def wang_prob(cm, cf_val):
+            u_safe = np.where((cm/c50_m + cf_val/2.58) == 0, 1e-6, (cm/c50_m + cf_val/2.58))
+            x, y = (cm/c50_m)/u_safe, (cf_val/2.58)/u_safe
+            U50 = 10.0**((1.0-x)*(1.0-y)*(-0.06*x - 1.35*y - 0.78*x*y))
+            n = 1.98*x + 1.98*y + 1.44*x*y
+            return (((cm/c50_m + cf_val/2.58)/U50)**n) / (1.0 + ((cm/c50_m + cf_val/2.58)/U50)**n)
+        
+        if isinstance(cf, np.ndarray):
+            res = []
+            for val in cf:
+                try:
+                    if wang_prob(30.0, val) - target_prob > 0:
+                        res.append(root_scalar(lambda cm: wang_prob(cm, val) - target_prob, bracket=[0, 30]).root)
+                    else: res.append(np.nan)
+                except: res.append(np.nan)
+            return np.array(res)
+        return np.nan
+
+    @staticmethod
+    def bouillon_2004_iso_cprop(c_remi, target_prob, efecto='Laringoscopia'):
+        if target_prob <= 0 or target_prob >= 1: return np.full_like(c_remi, np.nan) if isinstance(c_remi, np.ndarray) else np.nan
+        c50_remi, c50_prop, gamma_remi, gamma_prop = 1.07, 8.04, 0.97, 5.1
+        i_pre = 0.60 if efecto == 'LOC' else 1.05 
+        c_remi_safe = np.clip(c_remi, 1e-6, None) if isinstance(c_remi, np.ndarray) else max(1e-6, c_remi)
+        num_remi = c_remi_safe ** gamma_remi
+        den_remi = num_remi + (c50_remi * i_pre) ** gamma_remi
+        i_post = i_pre * (1.0 - (num_remi / den_remi))
+        term = (target_prob / (1.0 - target_prob)) ** (1.0 / gamma_prop)
+        return (c50_prop * i_post) * term
+
+    @staticmethod
+    def kazama_1998_iso_cprop(c_fent, target_prob, efecto):
+        params = {
+            'Disminución PAS 15%': (3.6, 9.7, 1.5, 1.5), 'Disminución PAS 30%': (8.1, 20.5, 3.1, 1.6),
+            'Disminución PAS 40%': (17.7, 195.1, 41.5, 8.5), 'Disminución FC 15%': (14.4, 3.5, 1.65, 3.3),
+            'Disminución FC 30%': (20.5, 6.7, 1.2, 4.6), 'Respuesta Somática': (13.8, 9.7, 6.8, 2.63),
+            'Supresión Aumento PAS 15%': (27.7, 5.3, 3.7, 1.7)
+        }
+        if efecto not in params or target_prob <= 0 or target_prob >= 1: return np.full_like(c_fent, np.nan) if isinstance(c_fent, np.ndarray) else np.nan
+        ec_s, ec_r, alpha, n = params[efecto]
+        return FarmacoMatematica.greco_iso_cs(c_fent, ec_s, ec_r, alpha, n, target_prob, invert=False)
+
+    @staticmethod
+    def katoh_1999_iso_csevo(c_fent, target_prob, efecto):
+        if target_prob <= 0 or target_prob >= 1: return np.full_like(c_fent, np.nan) if isinstance(c_fent, np.ndarray) else np.nan
+        if efecto == 'LOC': base_50, base_95, c50_fent, gamma_fent, max_red = 0.62, 0.71, 7.3, 1.2, 1.0
+        elif efecto == 'Respuesta Simpática': base_50, base_95, c50_fent, gamma_fent, max_red = 4.15, 6.26, 0.78, 1.5, 0.95
+        elif efecto == 'Respuesta Somática': base_50, base_95, c50_fent, gamma_fent, max_red = 1.77, 2.21, 1.08, 1.0, 0.80
+        else: return np.full_like(c_fent, np.nan) if isinstance(c_fent, np.ndarray) else np.nan
+        fr = (max_red * c_fent**gamma_fent) / (c50_fent**gamma_fent + c_fent**gamma_fent)
+        u50 = np.clip(base_50 * (1.0 - fr), 1e-5, None) if isinstance(base_50 * (1.0 - fr), np.ndarray) else max(1e-5, base_50 * (1.0 - fr))
+        ratio = np.clip((base_95 * (1.0 - fr)) / u50, 1.01, None) if isinstance((base_95 * (1.0 - fr)) / u50, np.ndarray) else max(1.01, (base_95 * (1.0 - fr)) / u50)
+        gamma = np.log(19.0) / np.log(ratio)
+        return u50 * ((target_prob / (1.0 - target_prob))**(1.0 / gamma))
+
+# 3. FARMACOCINÉTICA
+def calcular_ffm(peso, altura, sexo, edad):
+    bmi = peso / ((max(1.0, altura) / 100.0) ** 2)
+    wbm = (9270.0 * peso) / (6680.0 + 216.0 * bmi) if sexo == 'Masculino' else (9270.0 * peso) / (8780.0 + 244.0 * bmi)
+    a_mat, A50, c_mat = (0.88, 13.4, 12.7) if sexo == 'Masculino' else (1.11, 7.1, 1.1)
+    mf = a_mat + ((1.0 - a_mat) * (edad / A50)**c_mat) / (1.0 + (edad / A50)**c_mat) if edad > 0 else 1.0
+    return mf * wbm
+
+def get_pk_params(farmaco, modelo_pk, ke0_tpeak_str, peso, altura, sexo, edad):
+    if farmaco == 'Fentanilo':
+        if 'Scott 1987' in modelo_pk: V1, V2, V3 = 12.7, 50.7, 274.0; Cl1, Cl2, Cl3 = 0.574, 4.01, 1.95
+        elif 'Shafer 1990 (Fijo)' in modelo_pk: V1, V2, V3 = 6.09, 28.1, 228.0; Cl1, Cl2, Cl3 = 0.504, 2.87, 1.37
+        elif 'Shafer 1990 (Peso' in modelo_pk: V1, V2, V3 = 0.105*peso, 0.446*peso, 3.37*peso; Cl1, Cl2, Cl3 = 0.00838*peso, 0.0474*peso, 0.0199*peso
+        elif 'Bae 2020' in modelo_pk: f_vol, f_cl = (peso/70.0)**1.23, (peso/70.0)**0.313; V1, V2, V3 = 10.1*f_vol, 26.5*f_vol, 206.0*f_vol; Cl1, Cl2, Cl3 = 0.704*f_cl, 2.38*f_cl, 1.49*f_cl
+        elif 'Ginsberg' in modelo_pk: V1, V2, V3 = max(0.001, 0.43*(peso-19.8)+5.8), max(0.001, 6.2*(edad-6.4)+34.4), 0.0; Cl1, Cl2, Cl3 = max(0.001, 0.01*(peso-19.8)+0.35), max(0.001, 0.82), 0.0
+        elif 'Maharaj' in modelo_pk: V1, V2, V3 = 10.8*(peso/70.0), 417.0*(peso/70.0), 0.0; Cl1, Cl2, Cl3 = (32.5/60.0)*((peso/70.0)**0.75), (104.0/60.0)*((peso/70.0)**0.75), 0.0
+        else: V1, V2, V3 = 12.7, 50.7, 274.0; Cl1, Cl2, Cl3 = 0.574, 4.01, 1.95
+        
+        k10, k12, k21, k13, k31 = Cl1/V1, Cl2/V1, Cl2/V2, Cl3/V1, Cl3/V3
+        if 'Pediatría' in modelo_pk: ke0 = 0.0
+        elif '0.108' in ke0_tpeak_str: ke0 = 0.108
+        elif '0.105' in ke0_tpeak_str: ke0 = 0.105
+        elif '4 min' in ke0_tpeak_str:
+            a, b, c = k10+k12+k13+k21+k31, k10*(k21+k31)+k12*k31+k13*k21+k21*k31, k10*k21*k31
+            lambdas = sorted(-np.real(np.roots([1, a, b, c])[np.isreal(np.roots([1, a, b, c]))]), reverse=True)
+            if len(lambdas) < 3: ke0 = 0.147 
+            else:
+                l1, l2, l3 = lambdas[:3]
+                A = (k21-l1)*(k31-l1)/((l2-l1)*(l3-l1)); B = (k21-l2)*(k31-l2)/((l1-l2)*(l3-l2)); C_coeff = (k21-l3)*(k31-l3)/((l1-l3)*(l2-l3))
+                def obj(ke): return (A*np.exp(-l1*4.0) + B*np.exp(-l2*4.0) + C_coeff*np.exp(-l3*4.0)) - ke*(A*(4.0*np.exp(-ke*4.0) if abs(ke-l1)<1e-6 else (np.exp(-l1*4.0)-np.exp(-ke*4.0))/(ke-l1)) + B*(4.0*np.exp(-ke*4.0) if abs(ke-l2)<1e-6 else (np.exp(-l2*4.0)-np.exp(-ke*4.0))/(ke-l2)) + C_coeff*(4.0*np.exp(-ke*4.0) if abs(ke-l3)<1e-6 else (np.exp(-l3*4.0)-np.exp(-ke*4.0))/(ke-l3)))
+                try: ke0 = root_scalar(obj, bracket=[0.001, 3.0], method='brentq').root
+                except: ke0 = 0.147
         else: ke0 = 0.147
+
+    else: # Remifentanilo
+        lbm = (1.1*peso - 128.0*((peso/altura)**2)) if sexo == 'Masculino' else (1.07*peso - 148.0*((peso/altura)**2))
+        ffm = calcular_ffm(peso, altura, sexo, edad)
+        if 'Minto' in modelo_pk: V1, V2, V3 = max(0.01, 5.1-0.0201*(edad-40)+0.072*(lbm-55)), max(0.01, 9.82-0.0811*(edad-40)+0.108*(lbm-55)), 5.42; Cl1, Cl2, Cl3 = max(0.001, 2.6-0.0162*(edad-40)+0.0191*(lbm-55)), max(0.001, 2.05-0.0301*(edad-40)), max(0.001, 0.076-0.00113*(edad-40))
+        elif 'La Colla' in modelo_pk: V1, V2, V3 = max(0.01, 5.1-0.0201*(edad-40)+0.072*(ffm-55)), max(0.01, 9.82-0.0811*(edad-40)+0.108*(ffm-55)), 5.42; Cl1, Cl2, Cl3 = max(0.001, 2.6-0.0162*(edad-40)+0.0191*(ffm-55)), max(0.001, 2.05-0.0301*(edad-40)), max(0.001, 0.076-0.00113*(edad-40))
+        elif 'Kim' in modelo_pk: V1, V2, V3 = max(0.01, 4.76*((peso/74.5)**0.658)), max(0.01, 8.4*((ffm/52.3)**0.573)-0.0936*(edad-37)), max(0.01, 4.0-0.0477*(edad-37)); Cl1, Cl2, Cl3 = max(0.001, 2.77*((peso/74.5)**0.336)-0.0149*(edad-37)), max(0.001, 1.94-0.0280*(edad-37)), 0.197
+        elif 'Eleveld' in modelo_pk:
+            SIZE = ffm / calcular_ffm(70.0, 170.0, 'Masculino', 35.0)
+            KMAT = ((peso**2.0)/(peso**2.0 + 2.88**2.0)) / ((70.0**2.0)/(70.0**2.0 + 2.88**2.0))
+            KSEX = 1.0 if sexo == 'Masculino' else 1.0 + 0.470 * ((edad**6.0)/(edad**6.0 + 12.0**6.0)) * (1.0 - ((edad**6.0)/(edad**6.0 + 45.0**6.0)))
+            V1, V2, V3 = max(0.01, 5.81*SIZE*np.exp(-0.00554*(edad-35.0))), max(0.01, 8.82*SIZE*np.exp(-0.00327*(edad-35.0))*KSEX), max(0.01, 5.03*SIZE*np.exp(-0.0315*(edad-35.0))*np.exp(-0.0260*(peso-70.0)))
+            Cl1, Cl2, Cl3 = max(0.001, 2.58*(SIZE**0.75)*KMAT*KSEX*np.exp(-0.00327*(edad-35.0))), max(0.001, 1.72*(((max(0.01, 8.82*SIZE*np.exp(-0.00327*(edad-35.0))*KSEX))/8.82)**0.75)*np.exp(-0.00554*(edad-35.0))*KSEX), max(0.001, 0.124*(((max(0.01, 5.03*SIZE*np.exp(-0.0315*(edad-35.0))*np.exp(-0.0260*(peso-70.0))))/5.03)**0.75)*np.exp(-0.00554*(edad-35.0)))
+        elif 'Egan' in modelo_pk: V1, V2, V3 = 7.6, 9.4, 4.7; Cl1, Cl2, Cl3 = 2.92, 1.95, 0.10
+        elif 'Rigby' in modelo_pk: V1, V2, V3 = 0.963*(peso/10.5), 1.480*(peso/10.5), 0.0; Cl1, Cl2, Cl3 = 0.716*((peso/10.5)**0.75), 0.840*((peso/10.5)**0.75), 0.0
+        elif 'Staschen' in modelo_pk: V1, V2, V3 = 1.44*((peso/14.6)**0.81), 3.02*((peso/14.6)**0.74), 0.0; Cl1, Cl2, Cl3 = 1.09*((peso/14.6)**(1.32*(peso**-0.20))), 0.63*((peso/14.6)**0.70), 0.0
+        else: V1, V2, V3 = 5.1, 9.82, 5.42; Cl1, Cl2, Cl3 = 2.6, 2.05, 0.076
+
+        k10, k12, k21, k13, k31 = Cl1/V1, Cl2/V1, Cl2/V2, Cl3/V1, Cl3/V3 if V3>0 else 0.0
+        if 'Pediátrico' in modelo_pk: ke0 = 0.0
+        elif 'Abad' in ke0_tpeak_str: ke0 = 0.120
+        elif 'Egan' in ke0_tpeak_str: ke0 = 0.433
+        elif 'Eleveld' in ke0_tpeak_str: ke0 = max(0.01, 1.09 * np.exp(-0.0289 * (edad - 35.0)))
+        else: ke0 = max(0.01, 0.595 - 0.007 * (edad - 40))
+
     return k10, k12, k21, k13, k31, ke0, V1, V2, V3
 
-# 3. Endpoint Principal de Simulación Total
-@app.post("/simular/fentanilo")
-def calcular_fentanilo_completo(datos: PeticionSimulacion) -> Dict[str, Any]:
-    
+def clean_arr(arr):
+    return [float(x) if not np.isnan(x) else None for x in arr]
+
+# 4. ENDPOINT ÚNICO UNIFICADO
+@app.post("/simular")
+def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
     k10, k12, k21, k13, k31, ke0, V1, V2, V3 = get_pk_params(
-        datos.modelo_pk, datos.ke0_tpeak, datos.peso_kg, 
+        datos.farmaco, datos.modelo_pk, datos.ke0_tpeak, datos.peso_kg, 
         datos.altura_cm, datos.sexo, datos.edad_anos
     )
 
     def ode_sys(y, t_ode):
-        x1, x2, x3, ce = y
+        x1, x2, x3, ce, ce_rig, ce_abad = y
         entrada_total = sum([ev.tasa_ug_min for ev in datos.eventos if ev.ini_min <= t_ode <= ev.fin_min])
         dx1 = entrada_total - (k10 + k12 + k13)*x1 + k21*x2 + k31*x3
-        return [dx1, k12*x1 - k21*x2, k13*x1 - k31*x3, ke0 * ((x1 / V1) - ce)]
+        return [dx1, k12*x1 - k21*x2, k13*x1 - k31*x3, ke0 * ((x1 / V1) - ce), 0.054 * ((x1 / V1) - ce_rig), 0.12 * ((x1 / V1) - ce_abad)]
 
-    # Determinar el tiempo de simulación dinámico (Resolución: 10 puntos por minuto para graficado perfecto)
     max_evento_min = max([e.fin_min for e in datos.eventos]) if datos.eventos else 60
     minutos_totales = max(datos.minutos_simulacion, int(max_evento_min) + 60)
-    puntos = (minutos_totales * 10) + 1
-    t_sim = np.linspace(0, float(minutos_totales), puntos)
+    t_sim = np.linspace(0, float(minutos_totales), (minutos_totales * 10) + 1)
     
-    solucion = odeint(ode_sys, [0.0, 0.0, 0.0, 0.0], t_sim)
-    Cp = solucion[:, 0] / V1
-    Ce = solucion[:, 3]
+    sol = odeint(ode_sys, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0], t_sim)
+    Cp = np.clip(sol[:, 0] / V1, 0.0, None)
+    Ce = np.clip(sol[:, 3], 0.0, None)
+    Ce_abad = np.clip(sol[:, 5], 0.0, None)
 
-    max_cp_idx = np.argmax(Cp); max_ce_idx = np.argmax(Ce)
-    max_cp = float(Cp[max_cp_idx]); max_ce = float(Ce[max_ce_idx])
-
-    # === ALERTAS Y VENTANAS CLÍNICAS ===
-    torax_lenoso = np.zeros_like(t_sim, dtype=bool)
-    depresion_resp = np.zeros_like(t_sim, dtype=bool)
-    urpa = np.zeros_like(t_sim, dtype=bool)
-    cam = np.zeros_like(t_sim, dtype=bool)
-    agb = np.zeros_like(t_sim, dtype=bool)
-    iet = np.zeros_like(t_sim, dtype=bool)
-
-    if 'Pediatría' not in datos.modelo_pk:
-        # Tórax Leñoso
-        dce_dt = ke0 * (Cp - Ce)
-        estado_tl_activo = False
-        umbral_gradiente = ke0 * 21.5 
-        for i in range(len(t_sim)):
-            if not estado_tl_activo:
-                if dce_dt[i] >= umbral_gradiente and Cp[i] >= 21.5: estado_tl_activo = True
-            else:
-                if Cp[i] <= 6.9: estado_tl_activo = False
-            torax_lenoso[i] = estado_tl_activo
-            
-        # Depresión respiratoria y ventanas
-        depresion_resp = Ce >= 1.0
-        urpa = (Ce >= 0.6) & (Ce <= 1.0)
-        cam = (Ce >= 0.9) & (Ce <= 1.1)
-        agb = (Ce >= 1.0) & (Ce <= 2.0)
-        iet = (Ce >= 2.0) & (Ce <= 3.0)
+    # === ALERTAS CLÍNICAS ===
+    torax_lenoso, depresion_resp, apnea = np.zeros_like(t_sim, dtype=bool), np.zeros_like(t_sim, dtype=bool), np.zeros_like(t_sim, dtype=bool)
+    if 'Pediátrico' not in datos.modelo_pk:
+        if datos.farmaco == 'Fentanilo':
+            grad_cp = np.gradient(Cp, t_sim)
+            is_rig = False
+            for i in range(len(t_sim)):
+                if not is_rig and Cp[i] >= 21.5 and grad_cp[i] > 0.1: is_rig = True
+                elif is_rig and Cp[i] <= 6.9: is_rig = False
+                torax_lenoso[i] = is_rig
+            depresion_resp = Ce >= 1.0
+        else:
+            apnea = Ce >= 1.5
 
     # === MODELOS FARMACODINÁMICOS (PD) ===
     pd_arrays = {}
-    if 'Pediatría' not in datos.modelo_pk:
-        # SEF
-        ic50_scott_87 = max(0.1, 11.4 - 0.0675 * datos.edad_anos)
-        pd_arrays['sef_scott_1985'] = 19.2 - 14.1 * (Ce**4.9) / (6.9**4.9 + Ce**4.9)
-        pd_arrays['sef_scott_1987'] = 18.9 - 13.0 * (Ce**4.3) / (ic50_scott_87**4.3 + Ce**4.3)
-        pd_arrays['sef_scott_1991'] = 25.0 - 16.8 * (Ce**6.2) / (8.1**6.2 + Ce**6.2)
-        
-        # Bae & Balanza
-        pd_arrays['prob_analgesia_bae'] = 100.0 * (Ce**2.24) / (0.63**2.24 + Ce**2.24)
-        pd_arrays['poder_theta_balanza'] = (Ce - 5.5) / 0.55
-        pd_arrays['mvi_balanza'] = np.clip(-1.62 * pd_arrays['poder_theta_balanza'] + 83.8, 0, 100)
-        pd_arrays['prob_conciencia_balanza'] = 100.0 / (1.0 + np.exp(-(2.6 - 0.1508 * pd_arrays['poder_theta_balanza'])))
-        
-        # Mildh
-        pd_arrays['vol_minuto_mildh'] = 9.9 * (1.0 - (Ce / (5.49 + Ce)))
-        pd_arrays['frec_resp_mildh'] = 15.1 * (1.0 - (Ce / (3.15 + Ce)))
-        pd_arrays['paco2_mildh'] = 40.503 + (3.915 * Ce)
+    if 'Pediátrico' not in datos.modelo_pk:
+        if datos.farmaco == 'Fentanilo':
+            ic50_scott = max(0.1, 11.4 - 0.0675 * datos.edad_anos)
+            pd_arrays['sef_scott_1985'] = FarmacoMatematica.hill(Ce, 6.9, 4.9, 19.2, 5.1).tolist()
+            pd_arrays['sef_scott_1987'] = FarmacoMatematica.hill(Ce, ic50_scott, 4.3, 18.9, 5.9).tolist()
+            pd_arrays['sef_scott_1991'] = FarmacoMatematica.hill(Ce, 8.1, 6.2, 25.0, 8.2).tolist()
+            pd_arrays['prob_analgesia_bae'] = FarmacoMatematica.hill(Ce, 0.63, 2.24, 0.0, 100.0).tolist()
+            pd_arrays['poder_theta_balanza'] = ((Ce - 5.5) / 0.55).tolist()
+            pd_arrays['mvi_balanza'] = np.clip(-1.62 * ((Ce - 5.5) / 0.55) + 83.8, 0, 100).tolist()
+            pd_arrays['prob_conciencia_balanza'] = (100.0 / (1.0 + np.exp(-(2.6 - 0.1508 * ((Ce - 5.5) / 0.55))))).tolist()
+            pd_arrays['vol_minuto_mildh'] = (9.9 * (1.0 - (Ce / (5.49 + Ce)))).tolist()
+            pd_arrays['frec_resp_mildh'] = (15.1 * (1.0 - (Ce / (3.15 + Ce)))).tolist()
+            pd_arrays['paco2_mildh'] = (40.503 + (3.915 * Ce)).tolist()
+        else:
+            ec50_minto = max(0.1, 13.1 - 0.148 * (datos.edad_anos - 40))
+            pd_arrays['sef_minto_1997'] = FarmacoMatematica.hill(Ce, ec50_minto, 2.44, 20.0, 5.5).tolist()
+            pd_arrays['sef_egan_1996'] = FarmacoMatematica.hill(Ce, 19.9, 4.3, 19.0, 5.2).tolist()
+            pd_arrays['sef_eleveld_2017'] = FarmacoMatematica.hill(Ce, 12.7, 2.87, 19.9, 5.66).tolist()
+            pd_arrays['analgesia_abad_2022'] = FarmacoMatematica.hill(Ce_abad, 2.8, 1.9, 0.0, 100.0).tolist()
 
     # === INTERACCIONES PD (ISOBOLAS) ===
-    # Calculamos las curvas del espacio de diseño (no dependientes del tiempo, sino de concentraciones meta)
     isobolas = {}
-    if 'Pediatría' not in datos.modelo_pk:
-        max_y = max(max_cp, max_ce) * 1.1 if max(max_cp, max_ce) > 0 else 5.0
+    if 'Pediátrico' not in datos.modelo_pk:
+        max_y = max(np.max(Cp), np.max(Ce)) * 1.1 if max(np.max(Cp), np.max(Ce)) > 0 else 10.0
         ce_y = np.linspace(0, max_y, 100)
+        isobolas['ce_farmaco'] = ce_y.tolist()
         
-        # Propofol
-        base_50 = max(1.0, 4.9 - 0.09 * (datos.edad_anos - 20)); base_95 = base_50 * (5.4 / 3.3)
-        frac_red_conciencia = (0.50 * ce_y) / (0.75 + ce_y)
-        isobolas['propofol_conciencia'] = {
-            'ce_fentanilo': ce_y.tolist(),
-            'ce_propofol_50': (base_50 * (1.0 - frac_red_conciencia)).tolist(),
-            'ce_propofol_95': (base_95 * (1.0 - frac_red_conciencia)).tolist()
-        }
+        if datos.farmaco == 'Fentanilo':
+            b_50 = max(1.0, 4.9 - 0.09*(datos.edad_anos - 20)); b_95 = b_50*(5.4/3.3); fr_sm = (0.50*ce_y)/(0.75+ce_y)
+            isobolas['propofol_smith_loc'] = {'ce_50': clean_arr(b_50*(1-fr_sm)), 'ce_95': clean_arr(b_95*(1-fr_sm))}
+            fr_som = (0.95*ce_y**1.4)/(0.63**1.4+ce_y**1.4)
+            isobolas['propofol_smith_somatica'] = {'ce_50': clean_arr(15.2*(1-fr_som)), 'ce_95': clean_arr(27.4*(1-fr_som))}
+            
+            for k_eff in ['Disminución PAS 15%', 'Disminución PAS 30%', 'Disminución PAS 40%', 'Disminución FC 15%', 'Disminución FC 30%', 'Respuesta Somática', 'Supresión Aumento PAS 15%']:
+                isobolas[f"propofol_kazama_{k_eff.replace(' ', '').replace('%', '').lower()}"] = {'ce_50': clean_arr(FarmacoMatematica.kazama_1998_iso_cprop(ce_y, 0.50, k_eff)), 'ce_95': clean_arr(FarmacoMatematica.kazama_1998_iso_cprop(ce_y, 0.95, k_eff))}
+            
+            for k_eff in ['LOC', 'Respuesta Simpática', 'Respuesta Somática']:
+                isobolas[f"sevo_katoh_{k_eff.replace(' ', '').lower()}"] = {'ce_50': clean_arr(FarmacoMatematica.katoh_1999_iso_csevo(ce_y, 0.50, k_eff)), 'ce_95': clean_arr(FarmacoMatematica.katoh_1999_iso_csevo(ce_y, 0.95, k_eff))}
+            
+            isobolas['sevo_vereecke_somatica'] = {'ce_50': clean_arr(FarmacoMatematica.vereecke_iso_cs(ce_y, 1.73, 2.07, 0.931, 6.40, 0.50)), 'ce_95': clean_arr(FarmacoMatematica.vereecke_iso_cs(ce_y, 1.73, 2.07, 0.931, 6.40, 0.95))}
+            isobolas['sevo_vereecke_simpatica'] = {'ce_50': clean_arr(FarmacoMatematica.vereecke_iso_cs(ce_y, 4.60, 0.43, 0.931, 6.40, 0.50)), 'ce_95': clean_arr(FarmacoMatematica.vereecke_iso_cs(ce_y, 4.60, 0.43, 0.931, 6.40, 0.95))}
+            isobolas['propofol_wang_lma'] = {'ce_50': clean_arr(FarmacoMatematica.wang_2026_iso_cm(ce_y, 9.77, 0.50)), 'ce_95': clean_arr(FarmacoMatematica.wang_2026_iso_cm(ce_y, 9.77, 0.95))}
+            isobolas['sevo_wang_lma'] = {'ce_50': clean_arr(FarmacoMatematica.wang_2026_iso_cm(ce_y, 4.29, 0.50)), 'ce_95': clean_arr(FarmacoMatematica.wang_2026_iso_cm(ce_y, 4.29, 0.95))}
+        
+        else: # Remifentanilo Isobolas
+            for e in ['Laringoscopia', 'LOC']:
+                isobolas[f"propofol_bouillon_{e.lower()[:3]}"] = {'ce_50': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.50, e)), 'ce_95': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.95, e))}
+            
+            p_greco = {'propofol_kern_lar': (5.60, 48.9, 33.2, 2.2, False), 'propofol_kern_mec': (4.16, 8.84, 8.2, 8.3, False), 'propofol_kern_elec': (4.56, 21.3, 14.7, 6.0, False), 'propofol_johnson_moaa_1': (2.2, 33.1, 3.6, 5.0, False), 'propofol_johnson_moaa_2': (1.3, 10.5, 2.8, 3.5, True), 'propofol_kern_moaa_3': (1.8, 12.5, 5.1, 5.8, False), 'propofol_kern_moaa_4': (1.8, 12.5, 5.1, 5.8, True), 'sevo_johnson_moaa_1': (0.74, 50.9, 9.4, 5.2, False), 'sevo_johnson_moaa_2': (0.74, 50.9, 9.4, 5.2, True), 'sevo_johnson_algo_30': (0.83, 1.3, 0.9, 2.7, False)}
+            for k, v in p_greco.items(): isobolas[k] = {'ce_50': clean_arr(FarmacoMatematica.greco_iso_cs(ce_y, v[0], v[1], v[2], v[3], 0.50, v[4])), 'ce_95': clean_arr(FarmacoMatematica.greco_iso_cs(ce_y, v[0], v[1], v[2], v[3], 0.95, v[4]))}
+            
+            p_man = {'sevo_manyam_moaa_1': (7.30, 7.84, 0.23, 3.94), 'sevo_manyam_moaa_4': (4.19, 4.25, 0.28, 0.58), 'sevo_manyam_mec': (3.82, 2.43, 0.54, 1.27), 'sevo_manyam_term': (3.38, 1.32, 0.55, 3.47), 'sevo_manyam_elec': (3.27, 0.97, 0.088, 1.09), 'sevo_manyam_lar': (3.70, 2.36, 0.54, 1.22)}
+            for k, v in p_man.items(): isobolas[k] = {'ce_50': clean_arr(FarmacoMatematica.manyam_iso_cs(ce_y, v[0], v[1], v[2], v[3], 0.50)), 'ce_95': clean_arr(FarmacoMatematica.manyam_iso_cs(ce_y, v[0], v[1], v[2], v[3], 0.95))}
 
-        K_50 = 1.0; K_95 = (0.95 / 0.05)**(1/3.7); Cp50_prop_base = 18.6; Cp50_fent_base = 9.1; alpha = 2.9
-        denom_hemo = (1.0 / Cp50_prop_base) + (alpha * ce_y) / (Cp50_prop_base * Cp50_fent_base)
-        x50_hemo = (K_50 - (ce_y / Cp50_fent_base)) / denom_hemo
-        x95_hemo = (K_95 - (ce_y / Cp50_fent_base)) / denom_hemo
-        x50_hemo[x50_hemo < 0] = np.nan; x95_hemo[x95_hemo < 0] = np.nan
-        isobolas['propofol_simpatica'] = {
-            'ce_fentanilo': ce_y.tolist(),
-            'ce_propofol_50': np.where(np.isnan(x50_hemo), None, x50_hemo).tolist(),
-            'ce_propofol_95': np.where(np.isnan(x95_hemo), None, x95_hemo).tolist()
-        }
-
-        frac_red_som_prop = (0.95 * ce_y**1.4) / (0.63**1.4 + ce_y**1.4)
-        isobolas['propofol_somatica'] = {
-            'ce_fentanilo': ce_y.tolist(),
-            'ce_propofol_50': (15.2 * (1.0 - frac_red_som_prop)).tolist(),
-            'ce_propofol_95': (27.4 * (1.0 - frac_red_som_prop)).tolist()
-        }
-
-        # Sevoflurano
-        frac_red_awa = (1.0 * ce_y**1.2) / (7.3**1.2 + ce_y**1.2)
-        isobolas['sevo_conciencia'] = {
-            'ce_fentanilo': ce_y.tolist(),
-            'et_sevo_50': (0.62 * (1.0 - frac_red_awa)).tolist(),
-            'et_sevo_95': (0.71 * (1.0 - frac_red_awa)).tolist()
-        }
-
-        frac_red_bar = (0.95 * ce_y**1.5) / (0.78**1.5 + ce_y**1.5)
-        isobolas['sevo_simpatica'] = {
-            'ce_fentanilo': ce_y.tolist(),
-            'et_sevo_50': (4.15 * (1.0 - frac_red_bar)).tolist(),
-            'et_sevo_95': (6.26 * (1.0 - frac_red_bar)).tolist()
-        }
-
-        frac_red_mac = (0.80 * ce_y) / (1.08 + ce_y)
-        isobolas['sevo_somatica'] = {
-            'ce_fentanilo': ce_y.tolist(),
-            'et_sevo_50': (1.77 * (1.0 - frac_red_mac)).tolist(),
-            'et_sevo_95': (2.21 * (1.0 - frac_red_mac)).tolist()
-        }
-
-    # === EMPAQUETADO DE RESPUESTA JSON ===
-    # Convertimos los arreglos a listas con precisión redondeada para reducir peso de red
     return {
-        "estado": "Exito",
-        "parametros_calculados": {
-            "ke0_aplicado": round(ke0, 5),
-            "v1": round(V1, 2), "v2": round(V2, 2), "v3": round(V3, 2),
-            "max_cp": round(max_cp, 3), "max_ce": round(max_ce, 3)
-        },
         "tiempo_minutos": np.round(t_sim, 2).tolist(),
         "cp": np.round(Cp, 3).tolist(),
         "ce": np.round(Ce, 3).tolist(),
-        
-        "alertas_clinicas": {
-            "torax_lenoso": torax_lenoso.tolist(),
-            "depresion_respiratoria": depresion_resp.tolist()
-        },
-        "ventanas_terapeuticas": {
-            "urpa": urpa.tolist(),
-            "cam": cam.tolist(),
-            "agb": agb.tolist(),
-            "iet": iet.tolist()
-        },
+        "alertas_clinicas": {"torax_lenoso": torax_lenoso.tolist(), "depresion_respiratoria": depresion_resp.tolist(), "apnea": apnea.tolist()},
         "farmacodinamia_pd": {k: np.round(v, 2).tolist() for k, v in pd_arrays.items()},
         "isobolas_interaccion": isobolas
     }
