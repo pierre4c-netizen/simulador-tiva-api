@@ -22,6 +22,7 @@ class PeticionSimulacion(BaseModel):
     ke0_tpeak: str
     eventos: List[EventoTIVA]
     minutos_simulacion: int = 1440
+    modelo_3d: str = "Ninguna"  # <-- NUEVO: Recibe el modelo 3D desde Flutter
 
 app = FastAPI(title="TIVA Flow API Motor Matemático")
 
@@ -275,8 +276,10 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             pd_arrays['sef_eleveld_2017'] = FarmacoMatematica.hill(Ce, 12.7, 2.87, 19.9, 5.66).tolist()
             pd_arrays['analgesia_abad_2022'] = FarmacoMatematica.hill(Ce_abad, 2.8, 1.9, 0.0, 100.0).tolist()
 
-    # === INTERACCIONES PD (ISOBOLAS) ===
+    # === INTERACCIONES PD (ISOBOLAS Y 3D) ===
     isobolas = {}
+    superficie_3d = {}
+
     if 'Pediátrico' not in datos.modelo_pk:
         max_y = max(np.max(Cp), np.max(Ce)) * 1.1 if max(np.max(Cp), np.max(Ce)) > 0 else 10.0
         ce_y = np.linspace(0, max_y, 100)
@@ -290,6 +293,8 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             
             for k_eff in ['Disminución PAS 15%', 'Disminución PAS 30%', 'Disminución PAS 40%', 'Disminución FC 15%', 'Disminución FC 30%', 'Respuesta Somática', 'Supresión Aumento PAS 15%']:
                 isobolas[f"propofol_kazama_{k_eff.replace(' ', '').replace('%', '').lower()}"] = {'ce_50': clean_arr(FarmacoMatematica.kazama_1998_iso_cprop(ce_y, 0.50, k_eff)), 'ce_95': clean_arr(FarmacoMatematica.kazama_1998_iso_cprop(ce_y, 0.95, k_eff))}
+            # Mapeo manual para No Resp Somática a Respuesta Somática
+            isobolas["propofol_kazama_no_respuestasomatica"] = {'ce_50': clean_arr(FarmacoMatematica.kazama_1998_iso_cprop(ce_y, 0.50, 'Respuesta Somática')), 'ce_95': clean_arr(FarmacoMatematica.kazama_1998_iso_cprop(ce_y, 0.95, 'Respuesta Somática'))}
             
             for k_eff in ['LOC', 'Respuesta Simpática', 'Respuesta Somática']:
                 isobolas[f"sevo_katoh_{k_eff.replace(' ', '').lower()}"] = {'ce_50': clean_arr(FarmacoMatematica.katoh_1999_iso_csevo(ce_y, 0.50, k_eff)), 'ce_95': clean_arr(FarmacoMatematica.katoh_1999_iso_csevo(ce_y, 0.95, k_eff))}
@@ -311,11 +316,130 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             p_man = {'sevo_manyam_moaa_1': (7.30, 7.84, 0.23, 3.94), 'sevo_manyam_moaa_4': (4.19, 4.25, 0.28, 0.58), 'sevo_manyam_mec': (3.82, 2.43, 0.54, 1.27), 'sevo_manyam_term': (3.38, 1.32, 0.55, 3.47), 'sevo_manyam_elec': (3.27, 0.97, 0.088, 1.09), 'sevo_manyam_lar': (3.70, 2.36, 0.54, 1.22)}
             for k, v in p_man.items(): isobolas[k] = {'ce_50': clean_arr(FarmacoMatematica.manyam_iso_cs(ce_y, v[0], v[1], v[2], v[3], 0.50)), 'ce_95': clean_arr(FarmacoMatematica.manyam_iso_cs(ce_y, v[0], v[1], v[2], v[3], 0.95))}
 
+        # NUEVO: Construcción de la matriz 3D en el servidor
+        if datos.modelo_3d != 'Ninguna' and datos.modelo_3d in isobolas:
+            is_prop = 'propofol' in datos.modelo_3d
+            if datos.farmaco == 'Fentanilo':
+                y_max, x_max = 10.0, 20.0 if is_prop else 8.0
+                ylab = 'Ce Fentanilo (ng/ml)'
+            else:
+                y_max, x_max = 15.0, 15.0 if is_prop else 8.0
+                ylab = 'Ce Remifentanilo (ng/ml)'
+                
+            xlab = 'Ce Propofol (ug/ml)' if is_prop else 'etSEV (%)'
+            zlab = 'Valor BIS' if 'bis' in datos.modelo_3d else 'Probabilidad (%)'
+            
+            res = 25
+            x_m = np.linspace(0, x_max, res)
+            y_m = np.linspace(0, y_max, res)
+            X, Y = np.meshgrid(x_m, y_m)
+            
+            Z = np.zeros_like(X)
+            
+            if datos.farmaco == 'Fentanilo':
+                if 'smith_loc' in datos.modelo_3d:
+                    b_50 = max(1.0, 4.9 - 0.09*(datos.edad_anos - 20))
+                    fr = (0.50*Y)/(0.75+Y)
+                    u50 = np.clip(b_50 * (1.0 - fr), 1e-5, None)
+                    ratio = np.clip((b_50*(5.4/3.3) * (1.0 - fr)) / u50, 1.01, None)
+                    Z = (X**(np.log(19.0)/np.log(ratio))) / (X**(np.log(19.0)/np.log(ratio)) + u50**(np.log(19.0)/np.log(ratio))) * 100.0
+                elif 'smith_somatica' in datos.modelo_3d or 'no_respuestasomatica' in datos.modelo_3d:
+                    fr = (0.95*Y**1.4)/(0.63**1.4+Y**1.4)
+                    u50 = np.clip(15.2 * (1.0 - fr), 1e-5, None)
+                    ratio = np.clip((27.4 * (1.0 - fr)) / u50, 1.01, None)
+                    Z = (X**(np.log(19.0)/np.log(ratio))) / (X**(np.log(19.0)/np.log(ratio)) + u50**(np.log(19.0)/np.log(ratio))) * 100.0
+                elif 'kazama' in datos.modelo_3d:
+                    eff = datos.modelo_3d.replace('propofol_kazama_', '')
+                    eff_map = {
+                        'disminuciónpas15': 'Disminución PAS 15%', 'disminuciónpas30': 'Disminución PAS 30%',
+                        'disminuciónpas40': 'Disminución PAS 40%', 'disminuciónfc15': 'Disminución FC 15%',
+                        'disminuciónfc30': 'Disminución FC 30%', 'no_respuestasomatica': 'Respuesta Somática',
+                        'supresiónaumentopas15': 'Supresión Aumento PAS 15%'
+                    }
+                    if eff in eff_map:
+                        ec_s, ec_r, alpha, n = {
+                            'Disminución PAS 15%': (3.6, 9.7, 1.5, 1.5), 'Disminución PAS 30%': (8.1, 20.5, 3.1, 1.6),
+                            'Disminución PAS 40%': (17.7, 195.1, 41.5, 8.5), 'Disminución FC 15%': (14.4, 3.5, 1.65, 3.3),
+                            'Disminución FC 30%': (20.5, 6.7, 1.2, 4.6), 'Respuesta Somática': (13.8, 9.7, 6.8, 2.63),
+                            'Supresión Aumento PAS 15%': (27.7, 5.3, 3.7, 1.7)
+                        }[eff_map[eff]]
+                        Z = FarmacoMatematica.greco_prob(X, Y, ec_s, ec_r, alpha, n, False, True)
+                elif 'katoh' in datos.modelo_3d:
+                    eff = 'LOC' if 'loc' in datos.modelo_3d else ('Respuesta Simpática' if 'simpatica' in datos.modelo_3d else 'Respuesta Somática')
+                    b50, b95, c50f, gf, mred = (0.62,0.71,7.3,1.2,1.0) if eff=='LOC' else ((4.15,6.26,0.78,1.5,0.95) if eff=='Respuesta Simpática' else (1.77,2.21,1.08,1.0,0.80))
+                    fr = (mred * Y**gf) / (c50f**gf + Y**gf)
+                    u50 = np.clip(b50 * (1.0 - fr), 1e-5, None)
+                    ratio = np.clip((b95 * (1.0 - fr)) / u50, 1.01, None)
+                    Z = (X**(np.log(19.0)/np.log(ratio))) / (X**(np.log(19.0)/np.log(ratio)) + u50**(np.log(19.0)/np.log(ratio))) * 100.0
+                elif 'vereecke' in datos.modelo_3d:
+                    c50f, c50s = (2.07, 1.73) if 'somatica' in datos.modelo_3d else (0.43, 4.60)
+                    Z = FarmacoMatematica.vereecke_prob(X, Y, c50s, c50f, 0.931, 6.40, True)
+                elif 'wang' in datos.modelo_3d:
+                    c50m = 9.77 if is_prop else 4.29
+                    us = np.where((X/c50m + Y/2.58) == 0, 1e-6, (X/c50m + Y/2.58))
+                    x_w, y_w = (X/c50m)/us, (Y/2.58)/us
+                    U50 = 10.0**((1.0-x_w)*(1.0-y_w)*(-0.06*x_w - 1.35*y_w - 0.78*x_w*y_w))
+                    n_w = 1.98*x_w + 1.98*y_w + 1.44*x_w*y_w
+                    Z = (((X/c50m + Y/2.58)/U50)**n_w) / (1.0 + ((X/c50m + Y/2.58)/U50)**n_w) * 100.0
+                    Z = np.where((X/c50m + Y/2.58) == 0, 0, Z)
+            else: # Remifentanilo 3D
+                if 'bouillon_bis' in datos.modelo_3d:
+                    u_bis = (np.clip(X,0,None)/4.47) + (np.clip(Y,0,None)/19.3)
+                    Z = 97.4 - 97.4 * ((u_bis**1.43) / (1.0 + u_bis**1.43))
+                elif 'bouillon' in datos.modelo_3d:
+                    ipre = 0.60 if 'loc' in datos.modelo_3d else 1.05
+                    Ys = np.clip(Y, 1e-6, None)
+                    n_rem = Ys**0.97
+                    ipost = ipre * (1.0 - (n_rem / (n_rem + (1.07*ipre)**0.97)))
+                    Xs = np.clip(X, 1e-6, None)
+                    Z = (Xs**5.1) / (Xs**5.1 + (8.04*ipost)**5.1) * 100.0
+                elif 'kern' in datos.modelo_3d or 'johnson' in datos.modelo_3d:
+                    m = datos.modelo_3d
+                    if is_prop:
+                        if 'lar' in m: ecs, ecr, alp, n, inv = 5.60, 48.9, 33.2, 2.2, False
+                        elif 'mec' in m: ecs, ecr, alp, n, inv = 4.16, 8.84, 8.2, 8.3, False
+                        elif 'elec' in m: ecs, ecr, alp, n, inv = 4.56, 21.3, 14.7, 6.0, False
+                        elif 'moaa_1' in m: ecs, ecr, alp, n, inv = 2.2, 33.1, 3.6, 5.0, False
+                        elif 'moaa_2' in m: ecs, ecr, alp, n, inv = 1.3, 10.5, 2.8, 3.5, True
+                        elif 'moaa_3' in m: ecs, ecr, alp, n, inv = 1.8, 12.5, 5.1, 5.8, False
+                        elif 'moaa_4' in m: ecs, ecr, alp, n, inv = 1.8, 12.5, 5.1, 5.8, True
+                    else:
+                        if 'moaa_1' in m: ecs, ecr, alp, n, inv = 0.74, 50.9, 9.4, 5.2, False
+                        elif 'moaa_2' in m: ecs, ecr, alp, n, inv = 0.74, 50.9, 9.4, 5.2, True
+                        elif 'algo' in m: ecs, ecr, alp, n, inv = 0.83, 1.3, 0.9, 2.7, False
+                    Z = FarmacoMatematica.greco_prob(X, Y, ecs, ecr, alp, n, inv, True)
+                elif 'manyam_bis' in datos.modelo_3d:
+                    Z = FarmacoMatematica.greco_prob(X, Y, 2.37, 38.02, 0.52, 1.12, True, True)
+                elif 'manyam' in datos.modelo_3d:
+                    m = datos.modelo_3d
+                    if 'moaa_1' in m: b0,b1,b2,b3 = 7.30, 7.84, 0.23, 3.94
+                    elif 'moaa_4' in m: b0,b1,b2,b3 = 4.19, 4.25, 0.28, 0.58
+                    elif 'mec' in m: b0,b1,b2,b3 = 3.82, 2.43, 0.54, 1.27
+                    elif 'term' in m: b0,b1,b2,b3 = 3.38, 1.32, 0.55, 3.47
+                    elif 'elec' in m: b0,b1,b2,b3 = 3.27, 0.97, 0.088, 1.09
+                    elif 'lar' in m: b0,b1,b2,b3 = 3.70, 2.36, 0.54, 1.22
+                    Z = FarmacoMatematica.manyam_prob(X, Y, b0, b1, b2, b3, True)
+
+            superficie_3d = {
+                "x_mesh": x_m.tolist(),
+                "y_mesh": y_m.tolist(),
+                "z_mesh": np.round(Z, 2).tolist(),
+                "iso50_x": clean_arr(isobolas[datos.modelo_3d]['ce_50']),
+                "iso50_y": clean_arr(isobolas['ce_farmaco']),
+                "iso95_x": clean_arr(isobolas[datos.modelo_3d]['ce_95']),
+                "iso95_y": clean_arr(isobolas['ce_farmaco']),
+                "xlabel": xlab,
+                "ylabel": ylab,
+                "zlabel": zlab,
+                "title": datos.modelo_3d
+            }
+
     return {
         "tiempo_minutos": np.round(t_sim, 2).tolist(),
         "cp": np.round(Cp, 3).tolist(),
         "ce": np.round(Ce, 3).tolist(),
         "alertas_clinicas": {"torax_lenoso": torax_lenoso.tolist(), "depresion_respiratoria": depresion_resp.tolist(), "apnea": apnea.tolist()},
         "farmacodinamia_pd": {k: np.round(v, 2).tolist() for k, v in pd_arrays.items()},
-        "isobolas_interaccion": isobolas
+        "isobolas_interaccion": isobolas,
+        "superficie_3d": superficie_3d
     }
