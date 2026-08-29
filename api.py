@@ -22,7 +22,7 @@ class PeticionSimulacion(BaseModel):
     ke0_tpeak: str
     eventos: List[EventoTIVA]
     minutos_simulacion: int = 1440
-    modelo_3d: str = "Ninguna"  # <-- NUEVO: Recibe el modelo 3D desde Flutter
+    modelo_3d: str = "Ninguna"
 
 app = FastAPI(title="TIVA Flow API Motor Matemático")
 
@@ -214,8 +214,19 @@ def get_pk_params(farmaco, modelo_pk, ke0_tpeak_str, peso, altura, sexo, edad):
 
     return k10, k12, k21, k13, k31, ke0, V1, V2, V3
 
+# NUEVO: Función segura para evitar envío de números complejos o NaN a JSON
 def clean_arr(arr):
-    return [float(x) if not np.isnan(x) else None for x in arr]
+    res = []
+    for x in arr:
+        if x is None:
+            res.append(None)
+        else:
+            val = np.real(x)
+            if np.isnan(val) or np.isinf(val):
+                res.append(None)
+            else:
+                res.append(float(val))
+    return res
 
 # 4. ENDPOINT ÚNICO UNIFICADO
 @app.post("/simular")
@@ -376,12 +387,19 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                     Z = FarmacoMatematica.vereecke_prob(X, Y, c50s, c50f, 0.931, 6.40, True)
                 elif 'wang' in datos.modelo_3d:
                     c50m = 9.77 if is_prop else 4.29
-                    us = np.where((X/c50m + Y/2.58) == 0, 1e-6, (X/c50m + Y/2.58))
+                    base_val = X/c50m + Y/2.58
+                    us = np.where(base_val == 0, 1e-6, base_val)
                     x_w, y_w = (X/c50m)/us, (Y/2.58)/us
-                    U50 = 10.0**((1.0-x_w)*(1.0-y_w)*(-0.06*x_w - 1.35*y_w - 0.78*x_w*y_w))
+                    log_u50 = (1.0-x_w)*(1.0-y_w)*(-0.06*x_w - 1.35*y_w - 0.78*x_w*y_w)
+                    U50 = 10.0**log_u50
                     n_w = 1.98*x_w + 1.98*y_w + 1.44*x_w*y_w
-                    Z = (((X/c50m + Y/2.58)/U50)**n_w) / (1.0 + ((X/c50m + Y/2.58)/U50)**n_w) * 100.0
-                    Z = np.where((X/c50m + Y/2.58) == 0, 0, Z)
+                    
+                    # CÓDIGO CORREGIDO PARA EVITAR EL ERROR 500
+                    base_safe = np.clip(base_val / U50, 1e-10, None)
+                    n_w_safe = np.clip(n_w, 1e-10, None)
+                    pow_val = base_safe ** n_w_safe
+                    Z = (pow_val / (1.0 + pow_val)) * 100.0
+                    Z = np.where(base_val == 0, 0.0, Z)
             else: # Remifentanilo 3D
                 if 'bouillon_bis' in datos.modelo_3d:
                     u_bis = (np.clip(X,0,None)/4.47) + (np.clip(Y,0,None)/19.3)
@@ -420,7 +438,7 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                     elif 'lar' in m: b0,b1,b2,b3 = 3.70, 2.36, 0.54, 1.22
                     Z = FarmacoMatematica.manyam_prob(X, Y, b0, b1, b2, b3, True)
 
-            # ---> LÍNEA AÑADIDA PARA EVITAR EL ERROR 500 AL GENERAR EL JSON <---
+            # LÍNEA DE SEGURIDAD GENERAL PARA TODOS LOS MODELOS 3D
             Z = np.nan_to_num(Z, nan=0.0, posinf=100.0, neginf=0.0)
 
             superficie_3d = {
