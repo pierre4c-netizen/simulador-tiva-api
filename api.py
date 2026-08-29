@@ -420,6 +420,9 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                     elif 'lar' in m: b0,b1,b2,b3 = 3.70, 2.36, 0.54, 1.22
                     Z = FarmacoMatematica.manyam_prob(X, Y, b0, b1, b2, b3, True)
 
+            # ---> LÍNEA AÑADIDA PARA EVITAR EL ERROR 500 AL GENERAR EL JSON <---
+            Z = np.nan_to_num(Z, nan=0.0, posinf=100.0, neginf=0.0)
+
             superficie_3d = {
                 "x_mesh": x_m.tolist(),
                 "y_mesh": y_m.tolist(),
