@@ -1,11 +1,14 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Union
 import numpy as np
 from scipy.integrate import odeint
 from scipy.optimize import root_scalar
 
+# ==========================================
 # 1. ESTRUCTURAS DE ENTRADA
+# ==========================================
 class EventoTIVA(BaseModel):
     tipo: str
     ini_min: float
@@ -26,7 +29,18 @@ class PeticionSimulacion(BaseModel):
 
 app = FastAPI(title="TIVA Flow API Motor Matemático")
 
-# 2. CLASE MATEMÁTICA PURA (Farmacodinamia e Isobolas)
+# Habilitar CORS para evitar problemas si consultas desde Flutter Web/App
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ==========================================
+# 2. CLASE MATEMÁTICA PURA (PD e Isobolas)
+# ==========================================
 class FarmacoMatematica:
     @staticmethod
     def hill(c, c50, gamma, e0=0.0, emax=100.0):
@@ -214,7 +228,42 @@ class FarmacoMatematica:
         gamma = np.log(19.0) / np.log(ratio)
         return u50 * ((target_prob / (1.0 - target_prob))**(1.0 / gamma))
 
-# 3. FARMACOCINÉTICA (Con protección ZeroDivisionError)
+    # --- NUEVOS MODELOS KETAMINA (PD) ---
+    @staticmethod
+    def ketamina_pd(c: Union[float, np.ndarray], efecto: str) -> Union[float, np.ndarray]:
+        if efecto == 'Analgesia Nociception Index (ANI) (Navarrete 2025)':
+            return FarmacoMatematica.hill(c, 188.0, 12.5, 31.4, 100.0)
+        elif efecto == 'Presión Arterial Sistólica (Abuhelwa 2022)':
+            return FarmacoMatematica.hill(c, 468.0, 2.04, 97.1, 148.7)
+        elif efecto == 'Frecuencia Cardíaca (Abuhelwa 2022)':
+            return FarmacoMatematica.hill(c, 7580.0, 1.0, 72.7, 220.0)
+        elif efecto == 'Intensidad Disociativa (Olofsen 2022)':
+            return FarmacoMatematica.hill(c, 242.48, 5.33, 0.0, 100.0)
+        elif efecto == 'Factor de Tolerancia al Estimulo Mecanico (Olofsen 2022)':
+            return 1.0 + (c / 242.48)**1.31
+        return np.full_like(c, np.nan) if isinstance(c, np.ndarray) else np.nan
+
+    # --- NUEVOS MODELOS EEG HEYSE 2014 ---
+    @staticmethod
+    def heyse_2014_prob(c_sevo, c_remi, e0, c50_sevo, c50_remi, gamma):
+        u = (c_sevo / c50_sevo) + (c_remi / c50_remi)
+        return e0 - e0 * ((u**gamma) / (1.0 + u**gamma))
+
+    @staticmethod
+    def heyse_2014_iso_csevo(c_remi, target_effect, e0, c50_sevo, c50_remi, gamma):
+        if target_effect <= 0 or target_effect >= e0: 
+            return np.full_like(c_remi, np.nan) if isinstance(c_remi, np.ndarray) else np.nan
+        u_req = ((e0 - target_effect) / target_effect) ** (1.0 / gamma)
+        c_sevo = c50_sevo * (u_req - (c_remi / c50_remi))
+        if isinstance(c_sevo, np.ndarray): 
+            c_sevo[c_sevo < 0] = np.nan
+        else:
+            if c_sevo < 0: return np.nan
+        return c_sevo
+
+# ==========================================
+# 3. FARMACOCINÉTICA (PK) Y PROTECCIÓN
+# ==========================================
 def calcular_ke0_para_tpeak(k10, k12, k21, k13, k31, target_tpeak):
     a = k10 + k12 + k13 + k21 + k31
     b = k10*(k21+k31) + k12*k31 + k13*k21 + k21*k31
@@ -278,19 +327,30 @@ def _eleveld(p, a, s, e):
     return V1, V2, V3, Cl1, Cl2, Cl3
 
 PK_DISPATCHER = {
+    # FENTANILO
     'Scott 1987 (Fijo)': lambda p, a, s, e: (12.7, 50.7, 274.0, 0.574, 4.01, 1.95),
     'Shafer 1990 (Fijo)': lambda p, a, s, e: (6.09, 28.1, 228.0, 0.504, 2.87, 1.37),
     'Shafer 1990 (Peso Corporal Total)': lambda p, a, s, e: (0.105*p, 0.446*p, 3.37*p, 0.00838*p, 0.0474*p, 0.0199*p),
     'Bae 2020 (Alométrico)': lambda p, a, s, e: (10.1*((p/70.0)**1.23), 26.5*((p/70.0)**1.23), 206.0*((p/70.0)**1.23), 0.704*((p/70.0)**0.313), 2.38*((p/70.0)**0.313), 1.49*((p/70.0)**0.313)),
     'Ginsberg 1996 (Pediátrico / Peso Corporal Total y Edad)': lambda p, a, s, e: (max(0.001, 0.43*(p-19.8)+5.8), max(0.001, 6.2*(e-6.4)+34.4), 0.0, max(0.001, 0.01*(p-19.8)+0.35), max(0.001, 0.82), 0.0),
     'Maharaj 2019 (Pediátrico / Alométrico)': lambda p, a, s, e: (10.8*(p/70.0), 417.0*(p/70.0), 0.0, (32.5/60.0)*((p/70.0)**0.75), (104.0/60.0)*((p/70.0)**0.75), 0.0),
+    
+    # REMIFENTANILO
     'Egan 1996 (Fijo)': lambda p, a, s, e: (7.6, 9.4, 4.7, 2.92, 1.95, 0.10),
     'Rigby-Jones 2007 (Pediátrico / Alométrico)': lambda p, a, s, e: (0.963*(p/10.5), 1.480*(p/10.5), 0.0, 0.716*((p/10.5)**0.75), 0.840*((p/10.5)**0.75), 0.0),
     'Staschen 2013 (Pediátrico / Alométrico dependiente de peso)': lambda p, a, s, e: (1.44*((p/14.6)**0.81), 3.02*((p/14.6)**0.74), 0.0, 1.09*((p/14.6)**(1.32*(p**-0.20))), 0.63*((p/14.6)**0.70), 0.0),
     'Minto 1997 (Masa corporal magra y Edad)': _minto,
     'La Colla 2009 (Masa libre de grasa y Edad)': _lacolla,
     'Kim-Obara-Egan 2017 (Alométrico y Edad)': _kim,
-    'Eleveld 2017 (Propósito General / Alométrico, Edad y Sexo)': _eleveld
+    'Eleveld 2017 (Propósito General / Alométrico, Edad y Sexo)': _eleveld,
+    
+    # KETAMINA
+    'Clements125 1981 (Peso Corporal Total)': lambda p, a, s, e: (1.202*p, 2.114*p, 0.0, 0.0166*p, 0.0263*p, 0.0),
+    'Clements250 1981 (Peso Corporal Total)': lambda p, a, s, e: (1.70*p, 2.40*p, 0.0, 0.0191*p, 0.0317*p, 0.0),
+    'Domino 1982 (Fijo)': lambda p, a, s, e: (3.47, 11.0, 134.0, 1.296, 2.276, 2.058),
+    'Domino 1984 (Peso Corporal Total)': lambda p, a, s, e: (0.063*p, 0.1511*p, 2.5517*p, 0.0276*p, 0.0373*p, 0.0372*p),
+    'Kamp 2020 (Alométrico)': lambda p, a, s, e: (25.8*(p/70.0), 115.0*(p/70.0), 0.0, 1.78*((p/70.0)**0.75), 2.1*((p/70.0)**0.75), 0.0),
+    'Abuhelwa 2022 (Alométrico)': lambda p, a, s, e: (79.3*(p/70.0), 87.4*(p/70.0), 0.0, 1.16*((p/70.0)**0.75), (121.0/60.0)*((p/70.0)**0.75), 0.0)
 }
 
 def get_pk_params(farmaco, modelo_pk, ke0_tpeak_str, peso, altura, sexo, edad):
@@ -308,6 +368,11 @@ def get_pk_params(farmaco, modelo_pk, ke0_tpeak_str, peso, altura, sexo, edad):
 
     if 'Pediátrico' in modelo_pk:
         ke0 = 0.0
+    elif farmaco == 'Ketamina':
+        if '0.238' in ke0_tpeak_str: ke0 = 0.238
+        elif '1.83' in ke0_tpeak_str: ke0 = calcular_ke0_para_tpeak(k10, k12, k21, k13, k31, 1.83)
+        elif '0.0835' in ke0_tpeak_str: ke0 = 0.0835
+        else: ke0 = 0.0
     elif farmaco == 'Remifentanilo':
         if 'Abad' in ke0_tpeak_str: ke0 = 0.120
         elif 'Egan' in ke0_tpeak_str: ke0 = 0.433
@@ -332,7 +397,9 @@ def clean_arr(arr):
             else: res.append(float(val))
     return res
 
-# 4. ENDPOINT ÚNICO UNIFICADO (Usa directamente las llaves del Menú de Flutter)
+# ==========================================
+# 4. ENDPOINT ÚNICO UNIFICADO
+# ==========================================
 @app.post("/simular")
 def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
     k10, k12, k21, k13, k31, ke0, V1, V2, V3 = get_pk_params(
@@ -366,7 +433,7 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                 elif is_rig and Cp[i] <= 6.9: is_rig = False
                 torax_lenoso[i] = is_rig
             depresion_resp = Ce >= 1.0
-        else:
+        elif datos.farmaco == 'Remifentanilo':
             apnea = Ce >= 1.5
 
     # === MODELOS FARMACODINÁMICOS (PD) ===
@@ -383,7 +450,13 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             pd_arrays['VM (Mildh 2001)'] = (9.9 * (1.0 - (Ce / (5.49 + Ce)))).tolist()
             pd_arrays['FR (Mildh 2001)'] = (15.1 * (1.0 - (Ce / (3.15 + Ce)))).tolist()
             pd_arrays['PaCO2 (Mildh 2001)'] = (40.503 + (3.915 * Ce)).tolist()
-        else:
+        elif datos.farmaco == 'Ketamina':
+            pd_arrays['Analgesia Nociception Index (ANI) (Navarrete 2025)'] = FarmacoMatematica.ketamina_pd(Ce, 'Analgesia Nociception Index (ANI) (Navarrete 2025)').tolist()
+            pd_arrays['Presión Arterial Sistólica (Abuhelwa 2022)'] = FarmacoMatematica.ketamina_pd(Cp, 'Presión Arterial Sistólica (Abuhelwa 2022)').tolist()
+            pd_arrays['Frecuencia Cardíaca (Abuhelwa 2022)'] = FarmacoMatematica.ketamina_pd(Cp, 'Frecuencia Cardíaca (Abuhelwa 2022)').tolist()
+            pd_arrays['Intensidad Disociativa (Olofsen 2022)'] = FarmacoMatematica.ketamina_pd(Ce, 'Intensidad Disociativa (Olofsen 2022)').tolist()
+            pd_arrays['Factor de Tolerancia al Estimulo Mecanico (Olofsen 2022)'] = FarmacoMatematica.ketamina_pd(Ce, 'Factor de Tolerancia al Estimulo Mecanico (Olofsen 2022)').tolist()
+        else: # Remifentanilo
             pd_arrays['SEF (Minto 1997)'] = FarmacoMatematica.hill(Ce, max(0.1, 13.1 - 0.148 * (datos.edad_anos - 40)), 2.44, 20.0, 5.5).tolist()
             pd_arrays['SEF (Egan 1996)'] = FarmacoMatematica.hill(Ce, 19.9, 4.3, 19.0, 5.2).tolist()
             pd_arrays['SEF (Eleveld 2017)'] = FarmacoMatematica.hill(Ce, 12.7, 2.87, 19.9, 5.66).tolist()
@@ -425,7 +498,7 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             isobolas['Propofol Tolerancia LMA ΔANI < 20% (Wang 2026)'] = {'ce_50': clean_arr(FarmacoMatematica.wang_2026_iso_cm(ce_y, 9.77, 0.50)), 'ce_95': clean_arr(FarmacoMatematica.wang_2026_iso_cm(ce_y, 9.77, 0.95))}
             isobolas['Sevoflurano Tolerancia LMA ΔANI < 20% (Wang 2026)'] = {'ce_50': clean_arr(FarmacoMatematica.wang_2026_iso_cm(ce_y, 4.29, 0.50)), 'ce_95': clean_arr(FarmacoMatematica.wang_2026_iso_cm(ce_y, 4.29, 0.95))}
         
-        else: # Remifentanilo
+        elif datos.farmaco == 'Remifentanilo':
             isobolas['Propofol BIS (Bouillon 2004)'] = {'ce_50': clean_arr(FarmacoMatematica.bouillon_2004_bis_iso_cprop(ce_y, 60.0)), 'ce_95': clean_arr(FarmacoMatematica.bouillon_2004_bis_iso_cprop(ce_y, 40.0))}
             isobolas['Propofol LOC (Bouillon 2004)'] = {'ce_50': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.50, 'LOC')), 'ce_95': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.95, 'LOC'))}
             isobolas['Propofol Tolerancia Laringoscopia (Bouillon 2004)'] = {'ce_50': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.50, 'Laringoscopia')), 'ce_95': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.95, 'Laringoscopia'))}
@@ -447,15 +520,31 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             }
             for k, v in p_man.items(): isobolas[k] = {'ce_50': clean_arr(FarmacoMatematica.manyam_iso_cs(ce_y, v[0], v[1], v[2], v[3], 0.50)), 'ce_95': clean_arr(FarmacoMatematica.manyam_iso_cs(ce_y, v[0], v[1], v[2], v[3], 0.95))}
 
+            # Heyse 2014 EEG
+            e0_bis, gam_bis, c50_r_bis, c50_s_bisp, c50_s_biso = 89.5, 1.88, 27.3, 2.29, 1.99
+            isobolas['Sevoflurano BIS post-Laringoscopia (Heyse 2014)'] = {'ce_50': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 60.0, e0_bis, c50_s_bisp, c50_r_bis, gam_bis)), 'ce_95': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 40.0, e0_bis, c50_s_bisp, c50_r_bis, gam_bis))}
+            isobolas['Sevoflurano BIS pre-Laringoscopia (Heyse 2014)'] = {'ce_50': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 60.0, e0_bis, c50_s_biso, c50_r_bis, gam_bis)), 'ce_95': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 40.0, e0_bis, c50_s_biso, c50_r_bis, gam_bis))}
+            
+            e0_se, gam_se, c50_r_se, c50_s_sep, c50_s_seo = 97.1, 1.87, 16.2, 2.13, 1.82
+            isobolas['Sevoflurano SE post-Laringoscopia (Heyse 2014)'] = {'ce_50': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 60.0, e0_se, c50_s_sep, c50_r_se, gam_se)), 'ce_95': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 40.0, e0_se, c50_s_sep, c50_r_se, gam_se))}
+            isobolas['Sevoflurano SE pre-Laringoscopia (Heyse 2014)'] = {'ce_50': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 60.0, e0_se, c50_s_seo, c50_r_se, gam_se)), 'ce_95': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 40.0, e0_se, c50_s_seo, c50_r_se, gam_se))}
+            
+            e0_re, gam_re, c50_r_re, c50_s_rep, c50_s_reo = 103.0, 2.08, 18.2, 2.24, 1.88
+            isobolas['Sevoflurano RE post-Laringoscopia (Heyse 2014)'] = {'ce_50': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 60.0, e0_re, c50_s_rep, c50_r_re, gam_re)), 'ce_95': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 40.0, e0_re, c50_s_rep, c50_r_re, gam_re))}
+            isobolas['Sevoflurano RE pre-Laringoscopia (Heyse 2014)'] = {'ce_50': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 60.0, e0_re, c50_s_reo, c50_r_re, gam_re)), 'ce_95': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 40.0, e0_re, c50_s_reo, c50_r_re, gam_re))}
+
         # SUPERFICIE 3D UNIFICADA
         if datos.modelo_3d != 'Ninguna' and datos.modelo_3d in isobolas:
             is_prop = 'Propofol' in datos.modelo_3d
             if datos.farmaco == 'Fentanilo':
                 y_max, x_max = 10.0, 30.0 if is_prop else 8.0
                 ylab = 'Ce Fentanilo (ng/ml)'
-            else:
+            elif datos.farmaco == 'Remifentanilo':
                 y_max, x_max = 15.0, 15.0 if is_prop else 8.0
                 ylab = 'Ce Remifentanilo (ng/ml)'
+            else:
+                y_max, x_max = 10.0, 10.0
+                ylab = 'Ce Ketamina (ng/ml)'
                 
             xlab = 'Ce Propofol (ug/ml)' if is_prop else 'etSEV (%)'
             zlab = 'Valor BIS' if 'BIS' in datos.modelo_3d else 'Probabilidad (%)'
@@ -483,10 +572,21 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                     Z = FarmacoMatematica.vereecke_prob(X, Y, c50_s, c50_f, 0.931, 6.40, True)
                 elif 'Wang 2026' in datos.modelo_3d:
                     Z = FarmacoMatematica.wang_2026_prob(X, Y, 9.77 if is_prop else 4.29, True)
-            else:
+            elif datos.farmaco == 'Remifentanilo':
                 if 'Bouillon 2004' in datos.modelo_3d:
                     if 'BIS' in datos.modelo_3d: Z = FarmacoMatematica.bouillon_2004_bis(X, Y)
                     else: Z = FarmacoMatematica.bouillon_2004_prob(X, Y, 'LOC' if 'LOC' in datos.modelo_3d else 'Laringoscopia', True)
+                elif 'Heyse 2014' in datos.modelo_3d:
+                    if 'BIS' in datos.modelo_3d:
+                        e0, gamma, c50_remi = 89.5, 1.88, 27.3
+                        c50_sevo = 2.29 if 'post' in datos.modelo_3d else 1.99
+                    elif 'SE ' in datos.modelo_3d:
+                        e0, gamma, c50_remi = 97.1, 1.87, 16.2
+                        c50_sevo = 2.13 if 'post' in datos.modelo_3d else 1.82
+                    elif 'RE ' in datos.modelo_3d:
+                        e0, gamma, c50_remi = 103.0, 2.08, 18.2
+                        c50_sevo = 2.24 if 'post' in datos.modelo_3d else 1.88
+                    Z = FarmacoMatematica.heyse_2014_prob(X, Y, e0, c50_sevo, c50_remi, gamma)
                 elif 'Johnson' in datos.modelo_3d or 'Kern' in datos.modelo_3d:
                     v = p_greco[datos.modelo_3d]
                     Z = FarmacoMatematica.greco_prob(X, Y, v[0], v[1], v[2], v[3], invert=v[4], as_percent=True)
