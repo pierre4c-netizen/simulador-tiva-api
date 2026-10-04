@@ -231,15 +231,15 @@ class FarmacoMatematica:
     # --- NUEVOS MODELOS KETAMINA (PD) ---
     @staticmethod
     def ketamina_pd(c: Union[float, np.ndarray], efecto: str) -> Union[float, np.ndarray]:
-        if efecto == 'Analgesia Nociception Index (ANI) (Navarrete 2025)':
+        if 'Analgesia Nociception Index' in efecto:
             return FarmacoMatematica.hill(c, 188.0, 12.5, 31.4, 100.0)
-        elif efecto == 'Presión Arterial Sistólica (Abuhelwa 2022)':
+        elif 'Presión Arterial Sistólica' in efecto:
             return FarmacoMatematica.hill(c, 468.0, 2.04, 97.1, 148.7)
-        elif efecto == 'Frecuencia Cardíaca (Abuhelwa 2022)':
+        elif 'Frecuencia Cardíaca' in efecto:
             return FarmacoMatematica.hill(c, 7580.0, 1.0, 72.7, 220.0)
-        elif efecto == 'Intensidad Disociativa (Olofsen 2022)':
+        elif 'Intensidad Disociativa' in efecto:
             return FarmacoMatematica.hill(c, 242.48, 5.33, 0.0, 100.0)
-        elif efecto == 'Factor de Tolerancia al Estimulo Mecanico (Olofsen 2022)':
+        elif 'Factor Tolerancia' in efecto or 'Factor de Tolerancia' in efecto:
             return 1.0 + (c / 242.48)**1.31
         return np.full_like(c, np.nan) if isinstance(c, np.ndarray) else np.nan
 
@@ -434,27 +434,27 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
     pd_arrays = {}
     if 'Pediátrico' not in datos.modelo_pk:
         if datos.farmaco == 'Fentanilo':
-            pd_arrays['SEF (Scott 1985)'] = FarmacoMatematica.hill(Ce, 6.9, 4.9, 19.2, 5.1).tolist()
-            pd_arrays['SEF (Scott 1987)'] = FarmacoMatematica.hill(Ce, max(0.1, 11.4 - 0.0675 * datos.edad_anos), 4.3, 18.9, 5.9).tolist()
-            pd_arrays['SEF (Scott 1991)'] = FarmacoMatematica.hill(Ce, 8.1, 6.2, 25.0, 8.2).tolist()
-            pd_arrays['Probabilidad de EVA < 5 al aplicar 20 N (Bae 2020)'] = FarmacoMatematica.hill(Ce, 0.63, 2.24, 0.0, 100.0).tolist()
+            pd_arrays['Frecuencia Borde Espectral (Scott 1985)'] = FarmacoMatematica.hill(Ce, 6.9, 4.9, 19.2, 5.1).tolist()
+            pd_arrays['Frecuencia Borde Espectral (Scott 1987)'] = FarmacoMatematica.hill(Ce, max(0.1, 11.4 - 0.0675 * datos.edad_anos), 4.3, 18.9, 5.9).tolist()
+            pd_arrays['Frecuencia Borde Espectral (Scott 1991)'] = FarmacoMatematica.hill(Ce, 8.1, 6.2, 25.0, 8.2).tolist()
+            pd_arrays['Probabilidad EVA < 5 al aplicar 20N (Bae 2020)'] = FarmacoMatematica.hill(Ce, 0.63, 2.24, 0.0, 100.0).tolist()
             pd_arrays['Poder Theta (Balanza 2022)'] = ((Ce - 5.5) / 0.55).tolist()
-            pd_arrays['IVM (Balanza 2022)'] = np.clip(-1.62 * ((Ce - 5.5) / 0.55) + 83.8, 0, 100).tolist()
+            pd_arrays['Indice Ventilacion Minuto (Balanza 2022)'] = np.clip(-1.62 * ((Ce - 5.5) / 0.55) + 83.8, 0, 100).tolist()
             pd_arrays['LOC (Balanza 2022)'] = (100.0 / (1.0 + np.exp(-(2.6 - 0.1508 * ((Ce - 5.5) / 0.55))))).tolist()
-            pd_arrays['VM (Mildh 2001)'] = (9.9 * (1.0 - (Ce / (5.49 + Ce)))).tolist()
-            pd_arrays['FR (Mildh 2001)'] = (15.1 * (1.0 - (Ce / (3.15 + Ce)))).tolist()
+            pd_arrays['Ventilacion Minuto (Mildh 2001)'] = (9.9 * (1.0 - (Ce / (5.49 + Ce)))).tolist()
+            pd_arrays['Frecuencia Respiratoria (Mildh 2001)'] = (15.1 * (1.0 - (Ce / (3.15 + Ce)))).tolist()
             pd_arrays['PaCO2 (Mildh 2001)'] = (40.503 + (3.915 * Ce)).tolist()
         elif datos.farmaco == 'Ketamina':
             pd_arrays['Analgesia Nociception Index (ANI) (Navarrete 2025)'] = FarmacoMatematica.ketamina_pd(Ce, 'Analgesia Nociception Index (ANI) (Navarrete 2025)').tolist()
             pd_arrays['Presión Arterial Sistólica (Abuhelwa 2022)'] = FarmacoMatematica.ketamina_pd(Cp, 'Presión Arterial Sistólica (Abuhelwa 2022)').tolist()
             pd_arrays['Frecuencia Cardíaca (Abuhelwa 2022)'] = FarmacoMatematica.ketamina_pd(Cp, 'Frecuencia Cardíaca (Abuhelwa 2022)').tolist()
             pd_arrays['Intensidad Disociativa (Olofsen 2022)'] = FarmacoMatematica.ketamina_pd(Ce, 'Intensidad Disociativa (Olofsen 2022)').tolist()
-            pd_arrays['Factor de Tolerancia al Estimulo Mecanico (Olofsen 2022)'] = FarmacoMatematica.ketamina_pd(Ce, 'Factor de Tolerancia al Estimulo Mecanico (Olofsen 2022)').tolist()
+            pd_arrays['Factor Tolerancia al Estimulo Mecanico (Olofsen 2022)'] = FarmacoMatematica.ketamina_pd(Ce, 'Factor Tolerancia al Estimulo Mecanico (Olofsen 2022)').tolist()
         else: # Remifentanilo
-            pd_arrays['SEF (Minto 1997)'] = FarmacoMatematica.hill(Ce, max(0.1, 13.1 - 0.148 * (datos.edad_anos - 40)), 2.44, 20.0, 5.5).tolist()
-            pd_arrays['SEF (Egan 1996)'] = FarmacoMatematica.hill(Ce, 19.9, 4.3, 19.0, 5.2).tolist()
-            pd_arrays['SEF (Eleveld 2017)'] = FarmacoMatematica.hill(Ce, 12.7, 2.87, 19.9, 5.66).tolist()
-            pd_arrays['Factor de Tolerancia al Estimulo Mecanico (Abad 2022)'] = FarmacoMatematica.hill(Ce_abad, 2.8, 1.9, 1.0, 3.88).tolist()
+            pd_arrays['Frecuencia Borde Espectral (Minto 1997)'] = FarmacoMatematica.hill(Ce, max(0.1, 13.1 - 0.148 * (datos.edad_anos - 40)), 2.44, 20.0, 5.5).tolist()
+            pd_arrays['Frecuencia Borde Espectral (Egan 1996)'] = FarmacoMatematica.hill(Ce, 19.9, 4.3, 19.0, 5.2).tolist()
+            pd_arrays['Frecuencia Borde Espectral (Eleveld 2017)'] = FarmacoMatematica.hill(Ce, 12.7, 2.87, 19.9, 5.66).tolist()
+            pd_arrays['Factor Tolerancia al Estimulo Mecanico (Abad 2022)'] = FarmacoMatematica.hill(Ce_abad, 2.8, 1.9, 1.0, 3.88).tolist()
 
     # === INTERACCIONES PD (ISOBOLAS Y 3D) ===
     isobolas = {}
