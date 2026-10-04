@@ -327,15 +327,12 @@ def _eleveld(p, a, s, e):
     return V1, V2, V3, Cl1, Cl2, Cl3
 
 PK_DISPATCHER = {
-    # FENTANILO
     'Scott 1987 (Fijo)': lambda p, a, s, e: (12.7, 50.7, 274.0, 0.574, 4.01, 1.95),
     'Shafer 1990 (Fijo)': lambda p, a, s, e: (6.09, 28.1, 228.0, 0.504, 2.87, 1.37),
     'Shafer 1990 (Peso Corporal Total)': lambda p, a, s, e: (0.105*p, 0.446*p, 3.37*p, 0.00838*p, 0.0474*p, 0.0199*p),
     'Bae 2020 (Alométrico)': lambda p, a, s, e: (10.1*((p/70.0)**1.23), 26.5*((p/70.0)**1.23), 206.0*((p/70.0)**1.23), 0.704*((p/70.0)**0.313), 2.38*((p/70.0)**0.313), 1.49*((p/70.0)**0.313)),
     'Ginsberg 1996 (Pediátrico / Peso Corporal Total y Edad)': lambda p, a, s, e: (max(0.001, 0.43*(p-19.8)+5.8), max(0.001, 6.2*(e-6.4)+34.4), 0.0, max(0.001, 0.01*(p-19.8)+0.35), max(0.001, 0.82), 0.0),
     'Maharaj 2019 (Pediátrico / Alométrico)': lambda p, a, s, e: (10.8*(p/70.0), 417.0*(p/70.0), 0.0, (32.5/60.0)*((p/70.0)**0.75), (104.0/60.0)*((p/70.0)**0.75), 0.0),
-    
-    # REMIFENTANILO
     'Egan 1996 (Fijo)': lambda p, a, s, e: (7.6, 9.4, 4.7, 2.92, 1.95, 0.10),
     'Rigby-Jones 2007 (Pediátrico / Alométrico)': lambda p, a, s, e: (0.963*(p/10.5), 1.480*(p/10.5), 0.0, 0.716*((p/10.5)**0.75), 0.840*((p/10.5)**0.75), 0.0),
     'Staschen 2013 (Pediátrico / Alométrico dependiente de peso)': lambda p, a, s, e: (1.44*((p/14.6)**0.81), 3.02*((p/14.6)**0.74), 0.0, 1.09*((p/14.6)**(1.32*(p**-0.20))), 0.63*((p/14.6)**0.70), 0.0),
@@ -343,8 +340,6 @@ PK_DISPATCHER = {
     'La Colla 2009 (Masa libre de grasa y Edad)': _lacolla,
     'Kim-Obara-Egan 2017 (Alométrico y Edad)': _kim,
     'Eleveld 2017 (Propósito General / Alométrico, Edad y Sexo)': _eleveld,
-    
-    # KETAMINA
     'Clements125 1981 (Peso Corporal Total)': lambda p, a, s, e: (1.202*p, 2.114*p, 0.0, 0.0166*p, 0.0263*p, 0.0),
     'Clements250 1981 (Peso Corporal Total)': lambda p, a, s, e: (1.70*p, 2.40*p, 0.0, 0.0191*p, 0.0317*p, 0.0),
     'Domino 1982 (Fijo)': lambda p, a, s, e: (3.47, 11.0, 134.0, 1.296, 2.276, 2.058),
@@ -359,7 +354,6 @@ def get_pk_params(farmaco, modelo_pk, ke0_tpeak_str, peso, altura, sexo, edad):
     else:
         V1, V2, V3, Cl1, Cl2, Cl3 = 12.7, 50.7, 274.0, 0.574, 4.01, 1.95
 
-    # PREVENCIÓN ESTRICTA DE ZERO DIVISION ERROR
     k10 = Cl1/V1 if V1 > 0 else 0.0
     k12 = Cl2/V1 if V1 > 0 else 0.0
     k21 = Cl2/V2 if V2 > 0 else 0.0
@@ -443,7 +437,7 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             pd_arrays['SEF (Scott 1985)'] = FarmacoMatematica.hill(Ce, 6.9, 4.9, 19.2, 5.1).tolist()
             pd_arrays['SEF (Scott 1987)'] = FarmacoMatematica.hill(Ce, max(0.1, 11.4 - 0.0675 * datos.edad_anos), 4.3, 18.9, 5.9).tolist()
             pd_arrays['SEF (Scott 1991)'] = FarmacoMatematica.hill(Ce, 8.1, 6.2, 25.0, 8.2).tolist()
-            pd_arrays['Analgesia por Estímulo Mecánico (Bae 2020)'] = FarmacoMatematica.hill(Ce, 0.63, 2.24, 0.0, 100.0).tolist()
+            pd_arrays['Probabilidad de EVA < 5 al aplicar 20 N (Bae 2020)'] = FarmacoMatematica.hill(Ce, 0.63, 2.24, 0.0, 100.0).tolist()
             pd_arrays['Poder Theta (Balanza 2022)'] = ((Ce - 5.5) / 0.55).tolist()
             pd_arrays['IVM (Balanza 2022)'] = np.clip(-1.62 * ((Ce - 5.5) / 0.55) + 83.8, 0, 100).tolist()
             pd_arrays['LOC (Balanza 2022)'] = (100.0 / (1.0 + np.exp(-(2.6 - 0.1508 * ((Ce - 5.5) / 0.55))))).tolist()
@@ -460,7 +454,7 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             pd_arrays['SEF (Minto 1997)'] = FarmacoMatematica.hill(Ce, max(0.1, 13.1 - 0.148 * (datos.edad_anos - 40)), 2.44, 20.0, 5.5).tolist()
             pd_arrays['SEF (Egan 1996)'] = FarmacoMatematica.hill(Ce, 19.9, 4.3, 19.0, 5.2).tolist()
             pd_arrays['SEF (Eleveld 2017)'] = FarmacoMatematica.hill(Ce, 12.7, 2.87, 19.9, 5.66).tolist()
-            pd_arrays['Analgesia por Estímulo Mecánico (Abad 2022)'] = FarmacoMatematica.hill(Ce_abad, 2.8, 1.9, 0.0, 100.0).tolist()
+            pd_arrays['Factor de Tolerancia al Estimulo Mecanico (Abad 2022)'] = FarmacoMatematica.hill(Ce_abad, 2.8, 1.9, 1.0, 3.88).tolist()
 
     # === INTERACCIONES PD (ISOBOLAS Y 3D) ===
     isobolas = {}
