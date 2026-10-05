@@ -401,20 +401,21 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
         datos.altura_cm, datos.sexo, datos.edad_anos
     )
 
+    # SOLUCIÓN DE MOTOR: Simplificamos los compartimientos de 6 a 4. 
+    # Todo modelo PD se alimenta del Ce central anclado a la Ke0 seleccionada por el usuario.
     def ode_sys(y, t_ode):
-        x1, x2, x3, ce, ce_rig, ce_abad = y
+        x1, x2, x3, ce = y
         entrada_total = sum([ev.tasa_ug_min for ev in datos.eventos if ev.ini_min <= t_ode <= ev.fin_min])
         dx1 = entrada_total - (k10 + k12 + k13)*x1 + k21*x2 + k31*x3
-        return [dx1, k12*x1 - k21*x2, k13*x1 - k31*x3, ke0 * ((x1 / V1) - ce), 0.054 * ((x1 / V1) - ce_rig), 0.12 * ((x1 / V1) - ce_abad)]
+        return [dx1, k12*x1 - k21*x2, k13*x1 - k31*x3, ke0 * ((x1 / V1) - ce)]
 
     max_evento_min = max([e.fin_min for e in datos.eventos]) if datos.eventos else 60
     minutos_totales = max(datos.minutos_simulacion, int(max_evento_min) + 60)
     t_sim = np.linspace(0, float(minutos_totales), (minutos_totales * 10) + 1)
     
-    sol = odeint(ode_sys, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0], t_sim)
+    sol = odeint(ode_sys, [0.0, 0.0, 0.0, 0.0], t_sim)
     Cp = np.clip(sol[:, 0] / V1, 0.0, None)
     Ce = np.clip(sol[:, 3], 0.0, None)
-    Ce_abad = np.clip(sol[:, 5], 0.0, None)
 
     # === ALERTAS CLÍNICAS ===
     torax_lenoso, depresion_resp, apnea = np.zeros_like(t_sim, dtype=bool), np.zeros_like(t_sim, dtype=bool), np.zeros_like(t_sim, dtype=bool)
@@ -454,7 +455,8 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             pd_arrays['Frecuencia Borde Espectral (Minto 1997)'] = FarmacoMatematica.hill(Ce, max(0.1, 13.1 - 0.148 * (datos.edad_anos - 40)), 2.44, 20.0, 5.5).tolist()
             pd_arrays['Frecuencia Borde Espectral (Egan 1996)'] = FarmacoMatematica.hill(Ce, 19.9, 4.3, 19.0, 5.2).tolist()
             pd_arrays['Frecuencia Borde Espectral (Eleveld 2017)'] = FarmacoMatematica.hill(Ce, 12.7, 2.87, 19.9, 5.66).tolist()
-            pd_arrays['Factor Tolerancia al Estimulo Mecanico (Abad 2022)'] = FarmacoMatematica.hill(Ce_abad, 2.8, 1.9, 1.0, 3.88).tolist()
+            # SOLUCIÓN DE SINCRONÍA: Abad se calcula usando el Ce central dictado por el Ke0
+            pd_arrays['Factor Tolerancia al Estimulo Mecanico (Abad 2022)'] = FarmacoMatematica.hill(Ce, 2.8, 1.9, 1.0, 3.88).tolist()
 
     # === INTERACCIONES PD (ISOBOLAS Y 3D) ===
     isobolas = {}
