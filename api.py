@@ -228,22 +228,130 @@ class FarmacoMatematica:
         gamma = np.log(19.0) / np.log(ratio)
         return u50 * ((target_prob / (1.0 - target_prob))**(1.0 / gamma))
 
-    # --- NUEVOS MODELOS KETAMINA (PD) ---
+    # --- MODELOS KETAMINA (PD e ISOBOLAS INTERACTIVAS) ---
     @staticmethod
     def ketamina_pd(c: Union[float, np.ndarray], efecto: str) -> Union[float, np.ndarray]:
         if 'Analgesia Nociception Index' in efecto:
             return FarmacoMatematica.hill(c, 188.0, 12.5, 31.4, 100.0)
+        elif 'Frecuencia Mediana EEG' in efecto:
+            return FarmacoMatematica.hill(c, 2000.0, 3.8, 8.7, 1.1)
         elif 'Presión Arterial Sistólica' in efecto:
             return FarmacoMatematica.hill(c, 468.0, 2.04, 97.1, 148.7)
         elif 'Frecuencia Cardíaca' in efecto:
             return FarmacoMatematica.hill(c, 7580.0, 1.0, 72.7, 220.0)
         elif 'Intensidad Disociativa' in efecto:
             return FarmacoMatematica.hill(c, 242.48, 5.33, 0.0, 100.0)
-        elif 'Factor Tolerancia' in efecto or 'Factor de Tolerancia' in efecto:
+        elif 'Factor de Tolerancia' in efecto or 'Factor Tolerancia' in efecto:
             return 1.0 + (c / 242.48)**1.31
         return np.full_like(c, np.nan) if isinstance(c, np.ndarray) else np.nan
 
-    # --- NUEVOS MODELOS EEG HEYSE 2014 ---
+    @staticmethod
+    def herd_2008_prob_despertar(c_e: Union[float, np.ndarray], as_percent: bool = True) -> Union[float, np.ndarray]:
+        ce_mg_l = np.clip(c_e, 0.0, None) / 1000.0
+        logit_p0 = np.log(0.0247 / (1.0 - 0.0247))
+        logit_p = np.clip(logit_p0 + 7.19 * ce_mg_l, -50.0, 50.0)
+        p_despertar = 1.0 / (1.0 + np.exp(logit_p))
+        return p_despertar * 100.0 if as_percent else p_despertar
+
+    @staticmethod
+    def herd_2008_sedacion(c_e: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
+        ce_mg_l = np.clip(c_e, 0.0, None) / 1000.0
+        c_pow = ce_mg_l ** 3.71
+        ec50_pow = 0.56 ** 3.71
+        num = 0.94 * c_pow
+        den = ec50_pow + c_pow
+        frac = np.where(den == 0, 0.0, num / den)
+        return 5.0 * (1.0 - frac)
+
+    @staticmethod
+    def jonkman_2018_prob(ce_remi: Union[float, np.ndarray], ce_ket: Union[float, np.ndarray], as_percent: bool = True) -> Union[float, np.ndarray]:
+        ce_remi_safe = np.clip(ce_remi, 0.0, None) if isinstance(ce_remi, np.ndarray) else max(0.0, ce_remi)
+        ce_ket_safe = np.clip(ce_ket, 0.0, None) if isinstance(ce_ket, np.ndarray) else max(0.0, ce_ket)
+        
+        c50_1, g1 = 1.24, 8.44
+        c50_2_basal, g2 = 0.46, 4.37
+        cd2k, q = 254.0, 1.0  
+        
+        y1 = 1.0 / (1.0 + (ce_remi_safe / c50_1)**g1)
+        c50_2_dyn = c50_2_basal * (1.0 + (ce_ket_safe / cd2k)**q)
+        y2 = 1.0 / (1.0 + (ce_remi_safe / c50_2_dyn)**g2)
+        
+        p = 0.61 * y1 + 0.39 * y2
+        return p * 100.0 if as_percent else p
+
+    @staticmethod
+    def jonkman_2018_iso_cx(ce_known: Union[float, np.ndarray], target_prob: float, solve_for: str) -> Union[float, np.ndarray]:
+        if target_prob <= 0 or target_prob >= 1: return np.full_like(ce_known, np.nan) if isinstance(ce_known, np.ndarray) else np.nan
+        
+        def objective(cx, c_known, tgt, s_for):
+            if s_for == 'ket':
+                return float(FarmacoMatematica.jonkman_2018_prob(c_known, cx, False) - tgt)
+            else:
+                return float(FarmacoMatematica.jonkman_2018_prob(cx, c_known, False) - tgt)
+                
+        if isinstance(ce_known, np.ndarray):
+            res = []
+            for val in ce_known:
+                try:
+                    if solve_for == 'ket':
+                        if objective(0.0, val, target_prob, 'ket') > 0: res.append(np.nan)
+                        elif objective(50000.0, val, target_prob, 'ket') < 0: res.append(np.nan) 
+                        else: res.append(root_scalar(lambda cx: objective(cx, val, target_prob, 'ket'), bracket=[0.0, 50000.0]).root)
+                    else: 
+                        if objective(0.0, val, target_prob, 'remi') < 0: res.append(np.nan)
+                        else: res.append(root_scalar(lambda cx: objective(cx, val, target_prob, 'remi'), bracket=[0.0, 50.0]).root)
+                except: res.append(np.nan)
+            return np.array(res)
+        else:
+            try:
+                if solve_for == 'ket':
+                    if objective(0.0, ce_known, target_prob, 'ket') > 0 or objective(50000.0, ce_known, target_prob, 'ket') < 0: return np.nan
+                    return root_scalar(lambda cx: objective(cx, ce_known, target_prob, 'ket'), bracket=[0.0, 50000.0]).root
+                else: 
+                    if objective(0.0, ce_known, target_prob, 'remi') < 0: return np.nan
+                    return root_scalar(lambda cx: objective(cx, ce_known, target_prob, 'remi'), bracket=[0.0, 50.0]).root
+            except: return np.nan
+
+    @staticmethod
+    def hui_1995_prob(c_prop: Union[float, np.ndarray], c_ket: Union[float, np.ndarray], efecto: str = 'LOC', as_percent: bool = True) -> Union[float, np.ndarray]:
+        if 'Eléctrico' in efecto: c50_prop, c50_ket, gamma = 4.0, 1000.0, 5.33
+        else: c50_prop, c50_ket, gamma = 2.4, 600.0, 4.75
+            
+        c_prop_safe = np.clip(c_prop, 0.0, None) if isinstance(c_prop, np.ndarray) else max(0.0, c_prop)
+        c_ket_safe = np.clip(c_ket, 0.0, None) if isinstance(c_ket, np.ndarray) else max(0.0, c_ket)
+        
+        u = (c_prop_safe / c50_prop) + (c_ket_safe / c50_ket)
+        p = (u**gamma) / (1.0 + u**gamma)
+        return p * 100.0 if as_percent else p
+
+    @staticmethod
+    def hui_1995_iso_cx(c_known: Union[float, np.ndarray], target_prob: float, efecto: str = 'LOC', solve_for: str = 'prop') -> Union[float, np.ndarray]:
+        if target_prob <= 0 or target_prob >= 1: return np.full_like(c_known, np.nan) if isinstance(c_known, np.ndarray) else np.nan
+        
+        if 'Eléctrico' in efecto: c50_prop, c50_ket, gamma = 4.0, 1000.0, 5.33
+        else: c50_prop, c50_ket, gamma = 2.4, 600.0, 4.75
+            
+        u_req = (target_prob / (1.0 - target_prob)) ** (1.0 / gamma)
+        c_known_safe = np.clip(c_known, 0.0, None) if isinstance(c_known, np.ndarray) else max(0.0, c_known)
+        
+        res = c50_prop * (u_req - (c_known_safe / c50_ket)) if solve_for == 'prop' else c50_ket * (u_req - (c_known_safe / c50_prop))
+            
+        if isinstance(res, np.ndarray): res[res < 0] = np.nan
+        else: 
+            if res < 0: return np.nan
+        return res
+
+    @staticmethod
+    def hamp_2018_iso_csevo(c_ket: Union[float, np.ndarray], target_prob: float) -> Union[float, np.ndarray]:
+        if abs(target_prob - 0.50) > 1e-5: return np.full_like(c_ket, np.nan) if isinstance(c_ket, np.ndarray) else np.nan
+        c_ket_safe = np.clip(c_ket, 0.0, None) if isinstance(c_ket, np.ndarray) else max(0.0, c_ket)
+        res = 2.2 - (2.28 * (c_ket_safe / (758.0 + c_ket_safe)))
+        if isinstance(res, np.ndarray): res[res < 0] = np.nan
+        else: 
+            if res < 0: return np.nan
+        return res
+
+    # --- MODELOS EEG HEYSE 2014 ---
     @staticmethod
     def heyse_2014_prob(c_sevo, c_remi, e0, c50_sevo, c50_remi, gamma):
         u = (c_sevo / c50_sevo) + (c_remi / c50_remi)
@@ -264,31 +372,57 @@ class FarmacoMatematica:
 # ==========================================
 # 3. FARMACOCINÉTICA (PK) Y PROTECCIÓN
 # ==========================================
-def calcular_ke0_para_tpeak(k10, k12, k21, k13, k31, target_tpeak):
+def calcular_ke0_para_tpeak(k10: float, k12: float, k21: float, k13: float, k31: float, target_tpeak: float, default_ke0: float = 0.147) -> float:
+    if k13 == 0.0 and k31 == 0.0:
+        a = k10 + k12 + k21
+        b = k10 * k21
+        disc = max(0.0, a**2 - 4*b)
+        l1 = (a + np.sqrt(disc)) / 2.0
+        l2 = (a - np.sqrt(disc)) / 2.0
+        
+        if l1 == l2: return default_ke0
+            
+        A = (l1 - k21) / (l1 - l2)
+        B = (k21 - l2) / (l1 - l2)
+        
+        def objective_2c(ke: float) -> float:
+            def term(l, k, t): return t * np.exp(-k*t) if abs(k - l) < 1e-6 else (np.exp(-l*t) - np.exp(-k*t)) / (k - l)
+            Cp_t = A * np.exp(-l1 * target_tpeak) + B * np.exp(-l2 * target_tpeak)
+            Ce_t = ke * (A * term(l1, ke, target_tpeak) + B * term(l2, ke, target_tpeak))
+            return Cp_t - Ce_t
+
+        try: return root_scalar(objective_2c, bracket=[0.001, 100.0], method='brentq').root
+        except: return default_ke0
+
     a = k10 + k12 + k13 + k21 + k31
-    b = k10*(k21+k31) + k12*k31 + k13*k21 + k21*k31
-    c = k10*k21*k31
+    b = k10*(k21 + k31) + k12*k31 + k13*k21 + k21*k31
+    c = k10 * k21 * k31
     roots = np.roots([1, a, b, c])
     lambdas = sorted(-np.real(roots[np.isreal(roots)]), reverse=True)
-    if len(lambdas) < 3: return 0.147
+    
+    if len(lambdas) < 3: return default_ke0
+        
     l1, l2, l3 = lambdas[:3]
     A = (k21 - l1) * (k31 - l1) / ((l2 - l1) * (l3 - l1))
     B = (k21 - l2) * (k31 - l2) / ((l1 - l2) * (l3 - l2))
     C_coeff = (k21 - l3) * (k31 - l3) / ((l1 - l3) * (l2 - l3))
-    def get_term(l, ke, t): return t * np.exp(-ke * t) if abs(ke - l) < 1e-6 else (np.exp(-l * t) - np.exp(-ke * t)) / (ke - l)
-    def obj(ke): return (A * np.exp(-l1 * target_tpeak) + B * np.exp(-l2 * target_tpeak) + C_coeff * np.exp(-l3 * target_tpeak)) - ke * (A * get_term(l1, ke, target_tpeak) + B * get_term(l2, ke, target_tpeak) + C_coeff * get_term(l3, ke, target_tpeak))
-    try: return root_scalar(obj, bracket=[0.001, 3.0], method='brentq').root
-    except: return 0.147
+    
+    def get_term(l: float, ke: float, t: float) -> float: return t * np.exp(-ke * t) if abs(ke - l) < 1e-6 else (np.exp(-l * t) - np.exp(-ke * t)) / (ke - l)
+    def objective_3c(ke: float) -> float: return (A * np.exp(-l1 * target_tpeak) + B * np.exp(-l2 * target_tpeak) + C_coeff * np.exp(-l3 * target_tpeak)) - ke * (A * get_term(l1, ke, target_tpeak) + B * get_term(l2, ke, target_tpeak) + C_coeff * get_term(l3, ke, target_tpeak))
+        
+    try: return root_scalar(objective_3c, bracket=[0.001, 100.0], method='brentq').root
+    except: return default_ke0
 
 def calcular_ffm(peso, altura, sexo, edad):
-    bmi = peso / ((max(1.0, altura) / 100.0) ** 2)
+    altura_m = max(1.0, altura) / 100.0
+    bmi = peso / (altura_m ** 2)
     wbm = (9270.0 * peso) / (6680.0 + 216.0 * bmi) if sexo == 'Masculino' else (9270.0 * peso) / (8780.0 + 244.0 * bmi)
     a_mat, A50, c_mat = (0.88, 13.4, 12.7) if sexo == 'Masculino' else (1.11, 7.1, 1.1)
     mf = a_mat + ((1.0 - a_mat) * (edad / A50)**c_mat) / (1.0 + (edad / A50)**c_mat) if edad > 0 else 1.0
     return mf * wbm
 
 def _minto(p, a, s, e):
-    lbm = (1.1*p - 128.0*((p/a)**2)) if s == 'Masculino' else (1.07*p - 148.0*((p/a)**2))
+    lbm = (1.1*p - 128.0*((p/max(1.0, a))**2)) if s == 'Masculino' else (1.07*p - 148.0*((p/max(1.0, a))**2))
     V1 = max(0.01, 5.1-0.0201*(e-40)+0.072*(lbm-55))
     V2 = max(0.01, 9.82-0.0811*(e-40)+0.108*(lbm-55))
     Cl1 = max(0.001, 2.6-0.0162*(e-40)+0.0191*(lbm-55))
@@ -326,6 +460,16 @@ def _eleveld(p, a, s, e):
     Cl3 = max(0.001, 0.124*(((max(0.01, 5.03*SIZE*np.exp(-0.0315*(e-35.0))*np.exp(-0.0260*(p-70.0))))/5.03)**0.75)*np.exp(-0.00554*(e-35.0)))
     return V1, V2, V3, Cl1, Cl2, Cl3
 
+def _calcular_kamp_general(p, a, s, e):
+    V1, V2, V3 = 21.0 * (p/70.0), 46.0 * (p/70.0), 254.0 * (p/70.0)
+    Cl1, Cl2, Cl3 = (79.0/60.0) * ((p/70.0)**0.75), (97.0/60.0) * ((p/70.0)**0.75), (60.0/60.0) * ((p/70.0)**0.75)
+    return V1, V2, V3, Cl1, Cl2, Cl3
+
+def _calcular_herd_pediatrico(p, a, s, e):
+    V1, V2, V3 = 38.7 * (p/70.0), 102.0 * (p/70.0), 0.0
+    Cl1, Cl2, Cl3 = (90.0/60.0) * ((p/70.0)**0.75), (215.0/60.0) * ((p/70.0)**0.75), 0.0
+    return V1, V2, V3, Cl1, Cl2, Cl3
+
 PK_DISPATCHER = {
     'Scott 1987 (Fijo)': lambda p, a, s, e: (12.7, 50.7, 274.0, 0.574, 4.01, 1.95),
     'Shafer 1990 (Fijo)': lambda p, a, s, e: (6.09, 28.1, 228.0, 0.504, 2.87, 1.37),
@@ -345,7 +489,9 @@ PK_DISPATCHER = {
     'Domino 1982 (Fijo)': lambda p, a, s, e: (3.47, 11.0, 134.0, 1.296, 2.276, 2.058),
     'Domino 1984 (Peso Corporal Total)': lambda p, a, s, e: (0.063*p, 0.1511*p, 2.5517*p, 0.0276*p, 0.0373*p, 0.0372*p),
     'Kamp 2020 (Alométrico)': lambda p, a, s, e: (25.8*(p/70.0), 115.0*(p/70.0), 0.0, 1.78*((p/70.0)**0.75), 2.1*((p/70.0)**0.75), 0.0),
-    'Abuhelwa 2022 (Alométrico)': lambda p, a, s, e: (79.3*(p/70.0), 87.4*(p/70.0), 0.0, 1.16*((p/70.0)**0.75), (121.0/60.0)*((p/70.0)**0.75), 0.0)
+    'Kamp 2020 (Propósito General / Alométrico)': _calcular_kamp_general,
+    'Abuhelwa 2022 (Alométrico)': lambda p, a, s, e: (79.3*(p/70.0), 87.4*(p/70.0), 0.0, 1.16*((p/70.0)**0.75), (121.0/60.0)*((p/70.0)**0.75), 0.0),
+    'Herd 2007 (Pediátrico / Alométrico)': _calcular_herd_pediatrico
 }
 
 def get_pk_params(farmaco, modelo_pk, ke0_tpeak_str, peso, altura, sexo, edad):
@@ -360,11 +506,12 @@ def get_pk_params(farmaco, modelo_pk, ke0_tpeak_str, peso, altura, sexo, edad):
     k13 = Cl3/V1 if V1 > 0 else 0.0
     k31 = Cl3/V3 if V3 > 0 else 0.0
 
-    if 'Pediátrico' in modelo_pk:
+    if 'Pediátrico' in modelo_pk and farmaco != 'Ketamina':
         ke0 = 0.0
     elif farmaco == 'Ketamina':
         if '0.238' in ke0_tpeak_str: ke0 = 0.238
-        elif '1.83' in ke0_tpeak_str: ke0 = calcular_ke0_para_tpeak(k10, k12, k21, k13, k31, 1.83)
+        elif '1.83' in ke0_tpeak_str: ke0 = calcular_ke0_para_tpeak(k10, k12, k21, k13, k31, 1.83, default_ke0=0.238)
+        elif '11 seg' in ke0_tpeak_str: ke0 = calcular_ke0_para_tpeak(k10, k12, k21, k13, k31, 11.0 / 60.0, default_ke0=3.78)
         elif '0.0835' in ke0_tpeak_str: ke0 = 0.0835
         else: ke0 = 0.0
     elif farmaco == 'Remifentanilo':
@@ -375,7 +522,7 @@ def get_pk_params(farmaco, modelo_pk, ke0_tpeak_str, peso, altura, sexo, edad):
     else:
         if '0.108' in ke0_tpeak_str: ke0 = 0.108
         elif '0.105' in ke0_tpeak_str: ke0 = 0.105
-        elif '4 min' in ke0_tpeak_str: ke0 = calcular_ke0_para_tpeak(k10, k12, k21, k13, k31, 4.0)
+        elif '4 min' in ke0_tpeak_str: ke0 = calcular_ke0_para_tpeak(k10, k12, k21, k13, k31, 4.0, default_ke0=0.147)
         else: ke0 = 0.147
 
     return k10, k12, k21, k13, k31, ke0, V1, V2, V3
@@ -402,7 +549,6 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
     )
 
     # SOLUCIÓN DE MOTOR: Simplificamos los compartimientos de 6 a 4. 
-    # Todo modelo PD se alimenta del Ce central anclado a la Ke0 seleccionada por el usuario.
     def ode_sys(y, t_ode):
         x1, x2, x3, ce = y
         entrada_total = sum([ev.tasa_ug_min for ev in datos.eventos if ev.ini_min <= t_ode <= ev.fin_min])
@@ -419,7 +565,7 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
 
     # === ALERTAS CLÍNICAS ===
     torax_lenoso, depresion_resp, apnea = np.zeros_like(t_sim, dtype=bool), np.zeros_like(t_sim, dtype=bool), np.zeros_like(t_sim, dtype=bool)
-    if 'Pediátrico' not in datos.modelo_pk:
+    if 'Pediátrico' not in datos.modelo_pk or datos.farmaco == 'Ketamina':
         if datos.farmaco == 'Fentanilo':
             grad_cp = np.gradient(Cp, t_sim)
             is_rig = False
@@ -433,7 +579,7 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
 
     # === MODELOS FARMACODINÁMICOS (PD) ===
     pd_arrays = {}
-    if 'Pediátrico' not in datos.modelo_pk:
+    if 'Pediátrico' not in datos.modelo_pk or datos.farmaco == 'Ketamina':
         if datos.farmaco == 'Fentanilo':
             pd_arrays['Frecuencia Borde Espectral (Scott 1985)'] = FarmacoMatematica.hill(Ce, 6.9, 4.9, 19.2, 5.1).tolist()
             pd_arrays['Frecuencia Borde Espectral (Scott 1987)'] = FarmacoMatematica.hill(Ce, max(0.1, 11.4 - 0.0675 * datos.edad_anos), 4.3, 18.9, 5.9).tolist()
@@ -447,23 +593,29 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             pd_arrays['PaCO2 (Mildh 2001)'] = (40.503 + (3.915 * Ce)).tolist()
         elif datos.farmaco == 'Ketamina':
             pd_arrays['Analgesia Nociception Index (ANI) (Navarrete 2025)'] = FarmacoMatematica.ketamina_pd(Ce, 'Analgesia Nociception Index (ANI) (Navarrete 2025)').tolist()
+            pd_arrays['Frecuencia Mediana EEG (Schüttler 1987)'] = FarmacoMatematica.ketamina_pd(Cp, 'Frecuencia Mediana EEG (Schüttler 1987)').tolist()
             pd_arrays['Presión Arterial Sistólica (Abuhelwa 2022)'] = FarmacoMatematica.ketamina_pd(Cp, 'Presión Arterial Sistólica (Abuhelwa 2022)').tolist()
             pd_arrays['Frecuencia Cardíaca (Abuhelwa 2022)'] = FarmacoMatematica.ketamina_pd(Cp, 'Frecuencia Cardíaca (Abuhelwa 2022)').tolist()
             pd_arrays['Intensidad Disociativa (Olofsen 2022)'] = FarmacoMatematica.ketamina_pd(Ce, 'Intensidad Disociativa (Olofsen 2022)').tolist()
-            pd_arrays['Factor Tolerancia al Estimulo Mecanico (Olofsen 2022)'] = FarmacoMatematica.ketamina_pd(Ce, 'Factor Tolerancia al Estimulo Mecanico (Olofsen 2022)').tolist()
+            pd_arrays['Factor de Tolerancia al Estimulo Mecanico (Olofsen 2022)'] = FarmacoMatematica.ketamina_pd(Ce, 'Factor de Tolerancia al Estimulo Mecanico (Olofsen 2022)').tolist()
+            pd_arrays['Nivel de Sedación CHWSS (Herd 2008)'] = FarmacoMatematica.herd_2008_sedacion(Ce).tolist()
+            pd_arrays['Probabilidad de llegar al despertar (Herd 2008)'] = FarmacoMatematica.herd_2008_prob_despertar(Ce).tolist()
         else: # Remifentanilo
             pd_arrays['Frecuencia Borde Espectral (Minto 1997)'] = FarmacoMatematica.hill(Ce, max(0.1, 13.1 - 0.148 * (datos.edad_anos - 40)), 2.44, 20.0, 5.5).tolist()
             pd_arrays['Frecuencia Borde Espectral (Egan 1996)'] = FarmacoMatematica.hill(Ce, 19.9, 4.3, 19.0, 5.2).tolist()
             pd_arrays['Frecuencia Borde Espectral (Eleveld 2017)'] = FarmacoMatematica.hill(Ce, 12.7, 2.87, 19.9, 5.66).tolist()
-            # SOLUCIÓN DE SINCRONÍA: Abad se calcula usando el Ce central dictado por el Ke0
+            # Sincronía simplificada a Ce general para Abad en esta implementación
             pd_arrays['Factor Tolerancia al Estimulo Mecanico (Abad 2022)'] = FarmacoMatematica.hill(Ce, 2.8, 1.9, 1.0, 3.88).tolist()
 
     # === INTERACCIONES PD (ISOBOLAS Y 3D) ===
     isobolas = {}
     superficie_3d = {}
 
-    if 'Pediátrico' not in datos.modelo_pk:
-        max_y = max(np.max(Cp), np.max(Ce)) * 1.1 if max(np.max(Cp), np.max(Ce)) > 0 else 10.0
+    if 'Pediátrico' not in datos.modelo_pk or datos.farmaco == 'Ketamina':
+        base_max = max(np.max(Cp), np.max(Ce)) * 1.1 if max(np.max(Cp), np.max(Ce)) > 0 else 10.0
+        if datos.farmaco == 'Ketamina': max_y = max(base_max, 1000.0)
+        else: max_y = max(base_max, 15.0)
+        
         ce_y = np.linspace(0, max_y, 100)
         isobolas['ce_farmaco'] = ce_y.tolist()
         
@@ -495,6 +647,7 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             isobolas['Sevoflurano Tolerancia LMA ΔANI < 20% (Wang 2026)'] = {'ce_50': clean_arr(FarmacoMatematica.wang_2026_iso_cm(ce_y, 4.29, 0.50)), 'ce_95': clean_arr(FarmacoMatematica.wang_2026_iso_cm(ce_y, 4.29, 0.95))}
         
         elif datos.farmaco == 'Remifentanilo':
+            isobolas['Ketamina Probabilidad de Conservar la Ventilación Minuto (Jonkman 2018)'] = {'ce_50': clean_arr(FarmacoMatematica.jonkman_2018_iso_cx(ce_y, 0.50, solve_for='remi')), 'ce_95': clean_arr(FarmacoMatematica.jonkman_2018_iso_cx(ce_y, 0.80, solve_for='remi'))}
             isobolas['Propofol BIS (Bouillon 2004)'] = {'ce_50': clean_arr(FarmacoMatematica.bouillon_2004_bis_iso_cprop(ce_y, 60.0)), 'ce_95': clean_arr(FarmacoMatematica.bouillon_2004_bis_iso_cprop(ce_y, 40.0))}
             isobolas['Propofol LOC (Bouillon 2004)'] = {'ce_50': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.50, 'LOC')), 'ce_95': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.95, 'LOC'))}
             isobolas['Propofol Tolerancia Laringoscopia (Bouillon 2004)'] = {'ce_50': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.50, 'Laringoscopia')), 'ce_95': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.95, 'Laringoscopia'))}
@@ -516,7 +669,6 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             }
             for k, v in p_man.items(): isobolas[k] = {'ce_50': clean_arr(FarmacoMatematica.manyam_iso_cs(ce_y, v[0], v[1], v[2], v[3], 0.50)), 'ce_95': clean_arr(FarmacoMatematica.manyam_iso_cs(ce_y, v[0], v[1], v[2], v[3], 0.95))}
 
-            # Heyse 2014 EEG
             e0_bis, gam_bis, c50_r_bis, c50_s_bisp, c50_s_biso = 89.5, 1.88, 27.3, 2.29, 1.99
             isobolas['Sevoflurano BIS post-Laringoscopia (Heyse 2014)'] = {'ce_50': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 60.0, e0_bis, c50_s_bisp, c50_r_bis, gam_bis)), 'ce_95': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 40.0, e0_bis, c50_s_bisp, c50_r_bis, gam_bis))}
             isobolas['Sevoflurano BIS pre-Laringoscopia (Heyse 2014)'] = {'ce_50': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 60.0, e0_bis, c50_s_biso, c50_r_bis, gam_bis)), 'ce_95': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 40.0, e0_bis, c50_s_biso, c50_r_bis, gam_bis))}
@@ -526,8 +678,14 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             isobolas['Sevoflurano SE pre-Laringoscopia (Heyse 2014)'] = {'ce_50': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 60.0, e0_se, c50_s_seo, c50_r_se, gam_se)), 'ce_95': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 40.0, e0_se, c50_s_seo, c50_r_se, gam_se))}
             
             e0_re, gam_re, c50_r_re, c50_s_rep, c50_s_reo = 103.0, 2.08, 18.2, 2.24, 1.88
-            isobolas['Sevoflurano RE post-Laringoscopia (Heyse 2014)'] = {'ce_50': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 60.0, e0_re, c50_s_rep, c50_r_re, gam_re)), 'ce_95': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 40.0, e0_re, c50_s_rep, c50_r_re, gam_re))}
+            isobolas['Sevoflurano RE post-Laringoscopia (Heyse 2014)'] = {'ce_50': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 60.0, e0_re, c50_s_rep, c50_r_re, gam_re)), 'ce_95': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 40.0, e0_re, c50_s_reo, c50_r_re, gam_re))}
             isobolas['Sevoflurano RE pre-Laringoscopia (Heyse 2014)'] = {'ce_50': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 60.0, e0_re, c50_s_reo, c50_r_re, gam_re)), 'ce_95': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 40.0, e0_re, c50_s_reo, c50_r_re, gam_re))}
+
+        elif datos.farmaco == 'Ketamina':
+            isobolas['Remifentanilo Probabilidad de Conservar la Ventilación Minuto (Jonkman 2018)'] = {'ce_50': clean_arr(FarmacoMatematica.jonkman_2018_iso_cx(ce_y, 0.50, solve_for='ket')), 'ce_95': clean_arr(FarmacoMatematica.jonkman_2018_iso_cx(ce_y, 0.80, solve_for='ket'))}
+            isobolas['Propofol LOC (Hui 1995)'] = {'ce_50': clean_arr(FarmacoMatematica.hui_1995_iso_cx(ce_y, 0.50, efecto='LOC', solve_for='prop')), 'ce_95': clean_arr(FarmacoMatematica.hui_1995_iso_cx(ce_y, 0.95, efecto='LOC', solve_for='prop'))}
+            isobolas['Propofol Tolerancia al Estímulo Eléctrico (Hui 1995)'] = {'ce_50': clean_arr(FarmacoMatematica.hui_1995_iso_cx(ce_y, 0.50, efecto='Tolerancia al Estímulo Eléctrico', solve_for='prop')), 'ce_95': clean_arr(FarmacoMatematica.hui_1995_iso_cx(ce_y, 0.95, efecto='Tolerancia al Estímulo Eléctrico', solve_for='prop'))}
+            isobolas['Sevoflurano No Movimiento (Hamp 2018)'] = {'ce_50': clean_arr(FarmacoMatematica.hamp_2018_iso_csevo(ce_y, 0.50)), 'ce_95': clean_arr(np.full_like(ce_y, np.nan))}
 
         # SUPERFICIE 3D UNIFICADA
         if datos.modelo_3d != 'Ninguna' and datos.modelo_3d in isobolas:
@@ -535,16 +693,28 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             if datos.farmaco == 'Fentanilo':
                 y_max, x_max = 10.0, 30.0 if is_prop else 8.0
                 ylab = 'Ce Fentanilo (ng/ml)'
+                xlab = 'Ce Propofol (ug/ml)' if is_prop else 'etSEV (%)'
+                zlab = 'Valor BIS' if 'BIS' in datos.modelo_3d else 'Probabilidad (%)'
             elif datos.farmaco == 'Remifentanilo':
-                y_max, x_max = 15.0, 15.0 if is_prop else 8.0
-                ylab = 'Ce Remifentanilo (ng/ml)'
-            else:
-                y_max, x_max = 10.0, 10.0
-                ylab = 'Ce Ketamina (ng/ml)'
+                if 'Jonkman' in datos.modelo_3d:
+                    y_max, x_max = 1000.0, 10.0
+                    ylab, xlab, zlab = 'Ce Ketamina (ng/ml)', 'Ce Remifentanilo (ng/ml)', 'Ventilación Preservada (%)'
+                else:
+                    y_max, x_max = 15.0, 15.0 if is_prop else 8.0
+                    ylab = 'Ce Remifentanilo (ng/ml)'
+                    xlab = 'Ce Propofol (ug/ml)' if is_prop else 'etSEV (%)'
+                    zlab = 'Valor BIS' if 'BIS' in datos.modelo_3d else 'Probabilidad (%)'
+            else: # Ketamina
+                if 'Jonkman' in datos.modelo_3d:
+                    y_max, x_max = 10.0, 1000.0
+                    ylab, xlab, zlab = 'Ce Remifentanilo (ng/ml)', 'Ce Ketamina (ng/ml)', 'Ventilación Preservada (%)'
+                elif 'Hui' in datos.modelo_3d:
+                    y_max, x_max = 1000.0, 15.0
+                    ylab, xlab, zlab = 'Ce Ketamina (ng/ml)', 'Ce Propofol (ug/ml)', 'Probabilidad (%)'
+                else:
+                    y_max, x_max = 1000.0, 15.0
+                    ylab, xlab, zlab = 'Ce Ketamina (ng/ml)', 'Otro Agente', 'Probabilidad (%)'
                 
-            xlab = 'Ce Propofol (ug/ml)' if is_prop else 'etSEV (%)'
-            zlab = 'Valor BIS' if 'BIS' in datos.modelo_3d else 'Probabilidad (%)'
-            
             res = 25
             x_m = np.linspace(0, x_max, res)
             y_m = np.linspace(0, y_max, res)
@@ -572,6 +742,8 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                 if 'Bouillon 2004' in datos.modelo_3d:
                     if 'BIS' in datos.modelo_3d: Z = FarmacoMatematica.bouillon_2004_bis(X, Y)
                     else: Z = FarmacoMatematica.bouillon_2004_prob(X, Y, 'LOC' if 'LOC' in datos.modelo_3d else 'Laringoscopia', True)
+                elif 'Jonkman' in datos.modelo_3d:
+                    Z = FarmacoMatematica.jonkman_2018_prob(X, Y) # X=Remi, Y=Ketamina
                 elif 'Heyse 2014' in datos.modelo_3d:
                     if 'BIS' in datos.modelo_3d:
                         e0, gamma, c50_remi = 89.5, 1.88, 27.3
@@ -591,6 +763,13 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                 elif 'Manyam 2006' in datos.modelo_3d:
                     v = p_man[datos.modelo_3d]
                     Z = FarmacoMatematica.manyam_prob(X, Y, v[0], v[1], v[2], v[3], True)
+            elif datos.farmaco == 'Ketamina':
+                if 'Jonkman' in datos.modelo_3d:
+                    Z = FarmacoMatematica.jonkman_2018_prob(Y, X) # Y=Remi, X=Ketamina
+                elif 'Hui' in datos.modelo_3d:
+                    Z = FarmacoMatematica.hui_1995_prob(X, Y, efecto='Tolerancia al Estímulo Eléctrico' if 'Eléctrico' in datos.modelo_3d else 'LOC', as_percent=True)
+                else: 
+                    Z = np.zeros_like(X)
 
             Z = np.nan_to_num(Z, nan=0.0, posinf=100.0, neginf=0.0)
             superficie_3d = {
