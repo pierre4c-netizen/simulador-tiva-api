@@ -29,7 +29,6 @@ class PeticionSimulacion(BaseModel):
 
 app = FastAPI(title="TIVA Flow API Motor Matemático")
 
-# Habilitar CORS para evitar problemas si consultas desde Flutter Web/App
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -279,14 +278,15 @@ class FarmacoMatematica:
         p = 0.61 * y1 + 0.39 * y2
         return p * 100.0 if as_percent else p
 
+    # SOLUCIÓN MATEMÁTICA JONKMAN: Escalas y brackets independientes para Ketamina y Remifentanilo
     @staticmethod
     def jonkman_2018_iso_cx(ce_known: Union[float, np.ndarray], target_prob: float, solve_for: str) -> Union[float, np.ndarray]:
         if target_prob <= 0 or target_prob >= 1: return np.full_like(ce_known, np.nan) if isinstance(ce_known, np.ndarray) else np.nan
         
         def objective(cx, c_known, tgt, s_for):
-            if s_for == 'ket':
+            if s_for == 'ket': # Buscamos Ketamina, 'c_known' es Remifentanilo
                 return float(FarmacoMatematica.jonkman_2018_prob(c_known, cx, False) - tgt)
-            else:
+            else:              # Buscamos Remifentanilo, 'c_known' es Ketamina
                 return float(FarmacoMatematica.jonkman_2018_prob(cx, c_known, False) - tgt)
                 
         if isinstance(ce_known, np.ndarray):
@@ -548,7 +548,6 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
         datos.altura_cm, datos.sexo, datos.edad_anos
     )
 
-    # SOLUCIÓN DE MOTOR: Simplificamos los compartimientos de 6 a 4. 
     def ode_sys(y, t_ode):
         x1, x2, x3, ce = y
         entrada_total = sum([ev.tasa_ug_min for ev in datos.eventos if ev.ini_min <= t_ode <= ev.fin_min])
@@ -604,7 +603,6 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             pd_arrays['Frecuencia Borde Espectral (Minto 1997)'] = FarmacoMatematica.hill(Ce, max(0.1, 13.1 - 0.148 * (datos.edad_anos - 40)), 2.44, 20.0, 5.5).tolist()
             pd_arrays['Frecuencia Borde Espectral (Egan 1996)'] = FarmacoMatematica.hill(Ce, 19.9, 4.3, 19.0, 5.2).tolist()
             pd_arrays['Frecuencia Borde Espectral (Eleveld 2017)'] = FarmacoMatematica.hill(Ce, 12.7, 2.87, 19.9, 5.66).tolist()
-            # Sincronía simplificada a Ce general para Abad en esta implementación
             pd_arrays['Factor Tolerancia al Estimulo Mecanico (Abad 2022)'] = FarmacoMatematica.hill(Ce, 2.8, 1.9, 1.0, 3.88).tolist()
 
     # === INTERACCIONES PD (ISOBOLAS Y 3D) ===
@@ -647,7 +645,8 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             isobolas['Sevoflurano Tolerancia LMA ΔANI < 20% (Wang 2026)'] = {'ce_50': clean_arr(FarmacoMatematica.wang_2026_iso_cm(ce_y, 4.29, 0.50)), 'ce_95': clean_arr(FarmacoMatematica.wang_2026_iso_cm(ce_y, 4.29, 0.95))}
         
         elif datos.farmaco == 'Remifentanilo':
-            isobolas['Ketamina Probabilidad de Conservar la Ventilación Minuto (Jonkman 2018)'] = {'ce_50': clean_arr(FarmacoMatematica.jonkman_2018_iso_cx(ce_y, 0.50, solve_for='remi')), 'ce_95': clean_arr(FarmacoMatematica.jonkman_2018_iso_cx(ce_y, 0.80, solve_for='remi'))}
+            # SOLUCIÓN JONKMAN 1: El fármaco principal es Remifentanilo (Eje Y). Despejamos Ketamina (solve_for='ket')
+            isobolas['Ketamina Probabilidad de Conservar la Ventilación Minuto (Jonkman 2018)'] = {'ce_50': clean_arr(FarmacoMatematica.jonkman_2018_iso_cx(ce_y, 0.50, solve_for='ket')), 'ce_80': clean_arr(FarmacoMatematica.jonkman_2018_iso_cx(ce_y, 0.80, solve_for='ket'))}
             isobolas['Propofol BIS (Bouillon 2004)'] = {'ce_50': clean_arr(FarmacoMatematica.bouillon_2004_bis_iso_cprop(ce_y, 60.0)), 'ce_95': clean_arr(FarmacoMatematica.bouillon_2004_bis_iso_cprop(ce_y, 40.0))}
             isobolas['Propofol LOC (Bouillon 2004)'] = {'ce_50': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.50, 'LOC')), 'ce_95': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.95, 'LOC'))}
             isobolas['Propofol Tolerancia Laringoscopia (Bouillon 2004)'] = {'ce_50': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.50, 'Laringoscopia')), 'ce_95': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.95, 'Laringoscopia'))}
@@ -682,7 +681,8 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             isobolas['Sevoflurano RE pre-Laringoscopia (Heyse 2014)'] = {'ce_50': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 60.0, e0_re, c50_s_reo, c50_r_re, gam_re)), 'ce_95': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 40.0, e0_re, c50_s_reo, c50_r_re, gam_re))}
 
         elif datos.farmaco == 'Ketamina':
-            isobolas['Remifentanilo Probabilidad de Conservar la Ventilación Minuto (Jonkman 2018)'] = {'ce_50': clean_arr(FarmacoMatematica.jonkman_2018_iso_cx(ce_y, 0.50, solve_for='ket')), 'ce_95': clean_arr(FarmacoMatematica.jonkman_2018_iso_cx(ce_y, 0.80, solve_for='ket'))}
+            # SOLUCIÓN JONKMAN 2: El fármaco principal es Ketamina (Eje Y). Despejamos Remifentanilo (solve_for='remi')
+            isobolas['Remifentanilo Probabilidad de Conservar la Ventilación Minuto (Jonkman 2018)'] = {'ce_50': clean_arr(FarmacoMatematica.jonkman_2018_iso_cx(ce_y, 0.50, solve_for='remi')), 'ce_80': clean_arr(FarmacoMatematica.jonkman_2018_iso_cx(ce_y, 0.80, solve_for='remi'))}
             isobolas['Propofol LOC (Hui 1995)'] = {'ce_50': clean_arr(FarmacoMatematica.hui_1995_iso_cx(ce_y, 0.50, efecto='LOC', solve_for='prop')), 'ce_95': clean_arr(FarmacoMatematica.hui_1995_iso_cx(ce_y, 0.95, efecto='LOC', solve_for='prop'))}
             isobolas['Propofol Tolerancia al Estímulo Eléctrico (Hui 1995)'] = {'ce_50': clean_arr(FarmacoMatematica.hui_1995_iso_cx(ce_y, 0.50, efecto='Tolerancia al Estímulo Eléctrico', solve_for='prop')), 'ce_95': clean_arr(FarmacoMatematica.hui_1995_iso_cx(ce_y, 0.95, efecto='Tolerancia al Estímulo Eléctrico', solve_for='prop'))}
             isobolas['Sevoflurano No Movimiento (Hamp 2018)'] = {'ce_50': clean_arr(FarmacoMatematica.hamp_2018_iso_csevo(ce_y, 0.50)), 'ce_95': clean_arr(np.full_like(ce_y, np.nan))}
@@ -694,26 +694,28 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                 y_max, x_max = 10.0, 30.0 if is_prop else 8.0
                 ylab = 'Ce Fentanilo (ng/ml)'
                 xlab = 'Ce Propofol (ug/ml)' if is_prop else 'etSEV (%)'
-                zlab = 'Valor BIS' if 'BIS' in datos.modelo_3d else 'Probabilidad (%)'
+                zlab = datos.modelo_3d
             elif datos.farmaco == 'Remifentanilo':
+                # SOLUCIÓN JONKMAN 3D 1: Escalas correctas
                 if 'Jonkman' in datos.modelo_3d:
-                    y_max, x_max = 1000.0, 10.0
-                    ylab, xlab, zlab = 'Ce Ketamina (ng/ml)', 'Ce Remifentanilo (ng/ml)', 'Ventilación Preservada (%)'
+                    y_max, x_max = max(base_max, 10.0), 1000.0
+                    ylab, xlab, zlab = 'Ce Remifentanilo (ng/ml)', 'Ce Ketamina (ng/ml)', datos.modelo_3d
                 else:
-                    y_max, x_max = 15.0, 15.0 if is_prop else 8.0
+                    y_max, x_max = max(base_max, 10.0), 15.0 if is_prop else 8.0
                     ylab = 'Ce Remifentanilo (ng/ml)'
                     xlab = 'Ce Propofol (ug/ml)' if is_prop else 'etSEV (%)'
-                    zlab = 'Valor BIS' if 'BIS' in datos.modelo_3d else 'Probabilidad (%)'
+                    zlab = datos.modelo_3d
             else: # Ketamina
                 if 'Jonkman' in datos.modelo_3d:
-                    y_max, x_max = 10.0, 1000.0
-                    ylab, xlab, zlab = 'Ce Remifentanilo (ng/ml)', 'Ce Ketamina (ng/ml)', 'Ventilación Preservada (%)'
+                    # SOLUCIÓN JONKMAN 3D 2: Escalas correctas
+                    y_max, x_max = max(base_max, 1000.0), 10.0
+                    ylab, xlab, zlab = 'Ce Ketamina (ng/ml)', 'Ce Remifentanilo (ng/ml)', datos.modelo_3d
                 elif 'Hui' in datos.modelo_3d:
-                    y_max, x_max = 1000.0, 15.0
-                    ylab, xlab, zlab = 'Ce Ketamina (ng/ml)', 'Ce Propofol (ug/ml)', 'Probabilidad (%)'
+                    y_max, x_max = max(base_max, 1000.0), 15.0
+                    ylab, xlab, zlab = 'Ce Ketamina (ng/ml)', 'Ce Propofol (ug/ml)', datos.modelo_3d
                 else:
-                    y_max, x_max = 1000.0, 15.0
-                    ylab, xlab, zlab = 'Ce Ketamina (ng/ml)', 'Otro Agente', 'Probabilidad (%)'
+                    y_max, x_max = max(base_max, 1000.0), 15.0
+                    ylab, xlab, zlab = 'Ce Ketamina (ng/ml)', 'Otro Agente', datos.modelo_3d
                 
             res = 25
             x_m = np.linspace(0, x_max, res)
@@ -743,7 +745,7 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                     if 'BIS' in datos.modelo_3d: Z = FarmacoMatematica.bouillon_2004_bis(X, Y)
                     else: Z = FarmacoMatematica.bouillon_2004_prob(X, Y, 'LOC' if 'LOC' in datos.modelo_3d else 'Laringoscopia', True)
                 elif 'Jonkman' in datos.modelo_3d:
-                    Z = FarmacoMatematica.jonkman_2018_prob(X, Y) # X=Remi, Y=Ketamina
+                    Z = FarmacoMatematica.jonkman_2018_prob(Y, X) # Y=Remi, X=Ketamina
                 elif 'Heyse 2014' in datos.modelo_3d:
                     if 'BIS' in datos.modelo_3d:
                         e0, gamma, c50_remi = 89.5, 1.88, 27.3
@@ -765,7 +767,7 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                     Z = FarmacoMatematica.manyam_prob(X, Y, v[0], v[1], v[2], v[3], True)
             elif datos.farmaco == 'Ketamina':
                 if 'Jonkman' in datos.modelo_3d:
-                    Z = FarmacoMatematica.jonkman_2018_prob(Y, X) # Y=Remi, X=Ketamina
+                    Z = FarmacoMatematica.jonkman_2018_prob(X, Y) # X=Remi, Y=Ketamina
                 elif 'Hui' in datos.modelo_3d:
                     Z = FarmacoMatematica.hui_1995_prob(X, Y, efecto='Tolerancia al Estímulo Eléctrico' if 'Eléctrico' in datos.modelo_3d else 'LOC', as_percent=True)
                 else: 
@@ -775,7 +777,8 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             superficie_3d = {
                 "x_mesh": x_m.tolist(), "y_mesh": y_m.tolist(), "z_mesh": np.round(Z, 2).tolist(),
                 "iso50_x": clean_arr(isobolas[datos.modelo_3d]['ce_50']), "iso50_y": clean_arr(isobolas['ce_farmaco']),
-                "iso95_x": clean_arr(isobolas[datos.modelo_3d]['ce_95']), "iso95_y": clean_arr(isobolas['ce_farmaco']),
+                "iso80_x": clean_arr(isobolas[datos.modelo_3d].get('ce_80', [])),
+                "iso95_x": clean_arr(isobolas[datos.modelo_3d].get('ce_95', [])), "iso95_y": clean_arr(isobolas['ce_farmaco']),
                 "xlabel": xlab, "ylabel": ylab, "zlabel": zlab, "title": datos.modelo_3d
             }
 
