@@ -26,6 +26,9 @@ class PeticionSimulacion(BaseModel):
     eventos: List[EventoTIVA]
     minutos_simulacion: int = 1440
     modelo_3d: str = "Ninguna"
+    # Nuevos parámetros para la magia dinámica (Opcionales para no romper la app actual)
+    isobolograma_2d: str = "Ninguno"
+    tipo_grafico_iso: str = "Clásico"
 
 app = FastAPI(title="TIVA Flow API Motor Matemático")
 
@@ -227,7 +230,6 @@ class FarmacoMatematica:
         gamma = np.log(19.0) / np.log(ratio)
         return u50 * ((target_prob / (1.0 - target_prob))**(1.0 / gamma))
 
-    # --- MODELOS KETAMINA (PD e ISOBOLAS INTERACTIVAS) ---
     @staticmethod
     def ketamina_pd(c: Union[float, np.ndarray], efecto: str) -> Union[float, np.ndarray]:
         if 'Analgesia Nociception Index' in efecto:
@@ -278,15 +280,14 @@ class FarmacoMatematica:
         p = 0.61 * y1 + 0.39 * y2
         return p * 100.0 if as_percent else p
 
-    # SOLUCIÓN MATEMÁTICA JONKMAN: Escalas y brackets independientes para Ketamina y Remifentanilo
     @staticmethod
     def jonkman_2018_iso_cx(ce_known: Union[float, np.ndarray], target_prob: float, solve_for: str) -> Union[float, np.ndarray]:
         if target_prob <= 0 or target_prob >= 1: return np.full_like(ce_known, np.nan) if isinstance(ce_known, np.ndarray) else np.nan
         
         def objective(cx, c_known, tgt, s_for):
-            if s_for == 'ket': # Buscamos Ketamina, 'c_known' es Remifentanilo
+            if s_for == 'ket':
                 return float(FarmacoMatematica.jonkman_2018_prob(c_known, cx, False) - tgt)
-            else:              # Buscamos Remifentanilo, 'c_known' es Ketamina
+            else:
                 return float(FarmacoMatematica.jonkman_2018_prob(cx, c_known, False) - tgt)
                 
         if isinstance(ce_known, np.ndarray):
@@ -351,7 +352,10 @@ class FarmacoMatematica:
             if res < 0: return np.nan
         return res
 
-    # --- MODELOS EEG HEYSE 2014 ---
+    @staticmethod
+    def estimar_bis_global(etsev: float, ce_remi: float) -> float: 
+        return 100.0 / (((etsev/2.37) + (ce_remi/38.02) + 0.52*(etsev/2.37)*(ce_remi/38.02))**1.12 + 1.0)
+        
     @staticmethod
     def heyse_2014_prob(c_sevo, c_remi, e0, c50_sevo, c50_remi, gamma):
         u = (c_sevo / c50_sevo) + (c_remi / c50_remi)
@@ -368,6 +372,135 @@ class FarmacoMatematica:
         else:
             if c_sevo < 0: return np.nan
         return c_sevo
+
+    @staticmethod
+    def kuizenga_2019_c50(farmaco, ce_remi):
+        if farmaco == 'Propofol': c50_base, t1, t2 = 1.63, -0.135, 0.816
+        elif farmaco == 'Sevoflurano': c50_base, t1, t2 = 1.22, 0.0, 0.0
+        else: return np.full_like(ce_remi, np.nan) if isinstance(ce_remi, np.ndarray) else np.nan
+
+        is_array = isinstance(ce_remi, np.ndarray)
+        ce_r = np.clip(ce_remi, 0.0, 4.0) if is_array else max(0.0, min(4.0, ce_remi))
+        
+        if is_array:
+            INT = np.zeros_like(ce_r)
+            m1 = ce_r <= 2.0
+            m2 = ce_r > 2.0
+            INT[m1] = (ce_r[m1] / 2.0) * t1
+            INT[m2] = t1 + ((ce_r[m2] - 2.0) / 2.0) * (t1 * t2)
+            return c50_base * (1.0 + INT)
+        else:
+            if ce_r <= 2.0: INT = (ce_r / 2.0) * t1
+            else: INT = t1 + ((ce_r - 2.0) / 2.0) * (t1 * t2)
+            return c50_base * (1.0 + INT)
+
+    @staticmethod
+    def kuizenga_2019_prob(c_hyp, farmaco, efecto, ce_remi):
+        c50_adj = FarmacoMatematica.kuizenga_2019_c50(farmaco, ce_remi)
+        if farmaco == 'Propofol': gamma, e0, emax = 3.41, 85.1, 63.1
+        elif farmaco == 'Sevoflurano': gamma, e0, emax = 3.23, 85.1, 67.2
+        else: return np.nan
+
+        c_safe = np.clip(c_hyp, 0.0, None) if isinstance(c_hyp, np.ndarray) else max(0.0, c_hyp)
+        return e0 - emax * ( (c_safe**gamma) / (c50_adj**gamma + c_safe**gamma) )
+
+    @staticmethod
+    def kuizenga_2019_iso_c(farmaco, efecto, ce_remi, target_psi):
+        c50_adj = FarmacoMatematica.kuizenga_2019_c50(farmaco, ce_remi)
+        if farmaco == 'Propofol': gamma, e0, emax = 3.41, 85.1, 63.1
+        elif farmaco == 'Sevoflurano': gamma, e0, emax = 3.23, 85.1, 67.2
+        else: return np.full_like(ce_remi, np.nan) if isinstance(ce_remi, np.ndarray) else np.nan
+
+        if target_psi >= e0 or target_psi <= (e0 - emax):
+            return np.full_like(ce_remi, np.nan) if isinstance(ce_remi, np.ndarray) else np.nan
+            
+        e_ratio = (e0 - target_psi) / emax
+        k = (e_ratio / (1.0 - e_ratio)) ** (1.0 / gamma)
+        return c50_adj * k
+
+    # ==============================================================
+    # MOTOR DE EXTRACCIÓN DINÁMICA (Para la nueva Opción B)
+    # ==============================================================
+    @staticmethod
+    def obtener_coordenadas_isobolicas(iso_v: str, ce_y: np.ndarray, edad: float, farmaco: str) -> dict:
+        """Centraliza la matemática para sacar arrays de Req50, Req95, Base50 y Base95"""
+        res = {'x_base': np.full_like(ce_y, np.nan), 'x95': np.full_like(ce_y, np.nan), 'x50': np.full_like(ce_y, np.nan), 
+               'base_95': np.nan, 'base_50': np.nan, 'unit': ''}
+        
+        FM = FarmacoMatematica
+        if farmaco == 'Fentanilo':
+            if 'Smith 1994' in iso_v:
+                b_50 = max(1.0, 4.9 - 0.09*(edad - 20)) if 'LOC' in iso_v else 15.2
+                b_95 = b_50*(5.4/3.3) if 'LOC' in iso_v else 27.4
+                p_val, g_val, c50_f = (0.50, 1.0, 0.75) if 'LOC' in iso_v else (0.95, 1.4, 0.63)
+                fr_y = (p_val*ce_y**g_val)/(c50_f**g_val+ce_y**g_val)
+                res.update({'x95': b_95*(1-fr_y), 'x50': b_50*(1-fr_y), 'base_95': b_95, 'base_50': b_50, 'unit': 'ug/ml'})
+            elif 'Kazama 1998' in iso_v:
+                ef_map = {'↓ FC 15%': 'Disminución FC 15%', '↓ FC 30%': 'Disminución FC 30%', '↓ PAS 15%': 'Disminución PAS 15%', '↓ PAS 30%': 'Disminución PAS 30%', '↓ PAS 40%': 'Disminución PAS 40%', 'No Movimiento': 'Respuesta Somática', 'No ↑ PAS 15%': 'Supresión Aumento PAS 15%'}
+                ef_str = next((v for k, v in ef_map.items() if k in iso_v), 'Respuesta Somática')
+                res.update({'x95': FM.kazama_1998_iso_cprop(ce_y, 0.95, ef_str), 'x50': FM.kazama_1998_iso_cprop(ce_y, 0.50, ef_str), 'base_95': FM.kazama_1998_iso_cprop(0.0, 0.95, ef_str), 'base_50': FM.kazama_1998_iso_cprop(0.0, 0.50, ef_str), 'unit': 'ug/ml'})
+            elif 'Katoh' in iso_v:
+                ef_str = 'LOC 1998' if 'LOC' in iso_v else ('Somática 1998' if '1998' in iso_v else ('Somática 1999' if 'Movimiento' in iso_v else 'Simpática 1999'))
+                b50 = 0.62 if 'LOC' in iso_v else (1.84 if 'Somática 1998' == ef_str else (1.85 if 'Somática 1999' == ef_str else 4.15))
+                b95 = 0.71 if 'LOC' in iso_v else (2.21 if 'Somática 1998' == ef_str else (2.28 if 'Somática 1999' == ef_str else 6.26))
+                res.update({'x95': FM.katoh_iso_csevo(ce_y, 0.95, ef_str), 'x50': FM.katoh_iso_csevo(ce_y, 0.50, ef_str), 'base_95': b95, 'base_50': b50, 'unit': '%'})
+            elif 'Vereecke 2013' in iso_v:
+                is_mov = 'Movimiento' in iso_v; c50_f, c50_s, gamma, gamma_o = (2.07, 1.73, 6.40, 0.931) if is_mov else (0.43, 4.60, 6.40, 0.931)
+                res.update({'x95': FM.vereecke_iso_cs(ce_y, c50_s, c50_f, gamma_o, gamma, 0.95), 'x50': FM.vereecke_iso_cs(ce_y, c50_s, c50_f, gamma_o, gamma, 0.50), 'base_95': (19.0**(1.0/gamma))*c50_s, 'base_50': 1.0*c50_s, 'unit': '%'})
+            elif 'Wang 2026' in iso_v:
+                is_prop = 'Propofol' in iso_v; c50_m = 9.77 if is_prop else 4.29
+                res.update({'x95': FM.wang_2026_iso_cm(ce_y, c50_m, 0.95), 'x50': FM.wang_2026_iso_cm(ce_y, c50_m, 0.50), 'base_95': c50_m, 'base_50': c50_m, 'unit': 'ug/ml' if is_prop else '%'})
+
+        elif farmaco == 'Remifentanilo':
+            if 'Kuizenga 2019' in iso_v:
+                is_prop = 'Propofol' in iso_v
+                f_str = 'Propofol' if is_prop else 'Sevoflurano'
+                res.update({'x95': FM.kuizenga_2019_iso_c(f_str, 'PSI', ce_y, 25.0), 'x50': FM.kuizenga_2019_iso_c(f_str, 'PSI', ce_y, 50.0), 'base_95': FM.kuizenga_2019_iso_c(f_str, 'PSI', 0.0, 25.0), 'base_50': FM.kuizenga_2019_iso_c(f_str, 'PSI', 0.0, 50.0), 'unit': 'ug/ml' if is_prop else '%'})
+            elif 'Manyam 2006' in iso_v:
+                pm = {'≤ 1':(7.30,7.84,0.23,3.94), '≥ 4':(4.19,4.25,0.28,0.58), 'mecanico':(3.82,2.43,0.54,1.27), 'termico':(3.38,1.32,0.55,3.47), 'electrico':(3.27,0.97,0.088,1.09), 'Laringoscopia':(3.70,2.36,0.54,1.22)}
+                b0, b1, b2, b3 = next((v for k,v in pm.items() if k in iso_v), pm['≤ 1'])
+                res.update({'x95': FM.manyam_iso_cs(ce_y,b0,b1,b2,b3,0.95), 'x50': FM.manyam_iso_cs(ce_y,b0,b1,b2,b3,0.50), 'base_95': (b0+2.9444)/b1, 'base_50': b0/b1, 'unit': '%'})
+            elif 'Manyam 2007' in iso_v and 'BIS' in iso_v:
+                ec_s, ec_r, alp, n = 2.37, 38.02, 0.52, 1.12
+                res.update({'x95': FM.greco_iso_cs(ce_y,ec_s,ec_r,alp,n,0.4,invert=True), 'x50': FM.greco_iso_cs(ce_y,ec_s,ec_r,alp,n,0.6,invert=True), 'base_95': ec_s*((100.0/40 - 1.0)**(1.0/n)), 'base_50': ec_s*((100.0/60 - 1.0)**(1.0/n)), 'unit': '%'})
+            elif 'Heyse 2014' in iso_v:
+                if 'BIS' in iso_v: e0, gamma, c50_r, c50_s = 89.5, 1.88, 27.3, (2.29 if 'post' in iso_v else 1.99)
+                elif 'SE ' in iso_v: e0, gamma, c50_r, c50_s = 97.1, 1.87, 16.2, (2.13 if 'post' in iso_v else 1.82)
+                else: e0, gamma, c50_r, c50_s = 103.0, 2.08, 18.2, (2.24 if 'post' in iso_v else 1.88)
+                res.update({'x95': FM.heyse_2014_iso_csevo(ce_y,40.0,e0,c50_s,c50_r,gamma), 'x50': FM.heyse_2014_iso_csevo(ce_y,60.0,e0,c50_s,c50_r,gamma), 'base_95': FM.heyse_2014_iso_csevo(0.0,40.0,e0,c50_s,c50_r,gamma), 'base_50': FM.heyse_2014_iso_csevo(0.0,60.0,e0,c50_s,c50_r,gamma), 'unit': '%'})
+            elif 'Bouillon 2004' in iso_v:
+                if 'BIS' in iso_v:
+                    res.update({'x95': FM.bouillon_2004_bis_iso_cprop(ce_y,40.0), 'x50': FM.bouillon_2004_bis_iso_cprop(ce_y,60.0), 'base_95': FM.bouillon_2004_bis_iso_cprop(0.0,40.0), 'base_50': FM.bouillon_2004_bis_iso_cprop(0.0,60.0), 'unit': 'ug/ml'})
+                else:
+                    ef_str = 'LOC' if 'LOC' in iso_v else 'Laringoscopia'
+                    res.update({'x95': FM.bouillon_2004_iso_cprop(ce_y,0.95,ef_str), 'x50': FM.bouillon_2004_iso_cprop(ce_y,0.50,ef_str), 'base_95': FM.bouillon_2004_iso_cprop(0.0,0.95,ef_str), 'base_50': FM.bouillon_2004_iso_cprop(0.0,0.50,ef_str), 'unit': 'ug/ml'})
+            elif 'Jonkman 2018' in iso_v:
+                res.update({'x95': FM.jonkman_2018_iso_cx(ce_y,0.50,'ket'), 'x50': FM.jonkman_2018_iso_cx(ce_y,0.80,'ket'), 'base_95': FM.jonkman_2018_iso_cx(0.0,0.50,'ket'), 'base_50': FM.jonkman_2018_iso_cx(0.0,0.80,'ket'), 'unit': 'ng/ml'})
+            elif 'Kern 2004' in iso_v or 'Johnson' in iso_v:
+                is_prop = 'Propofol' in iso_v; is_waking = '≥ 2' in iso_v or '≥ 4' in iso_v
+                if is_prop:
+                    if '≤ 3' in iso_v or '≥ 4' in iso_v: ec_s, ec_r, alp, n = 1.8, 12.5, 5.1, 5.8
+                    elif 'Laringoscopia' in iso_v: ec_s, ec_r, alp, n = 5.60, 48.9, 33.2, 2.2
+                    elif 'Mecanico' in iso_v: ec_s, ec_r, alp, n = 4.16, 8.84, 8.2, 8.3
+                    elif 'Electrico' in iso_v: ec_s, ec_r, alp, n = 4.56, 21.3, 14.7, 6.0
+                    elif '≤ 1' in iso_v: ec_s, ec_r, alp, n = 2.2, 33.1, 3.6, 5.0
+                    elif '≥ 2' in iso_v: ec_s, ec_r, alp, n = 1.3, 10.5, 2.8, 3.5
+                else:
+                    if '≤ 1' in iso_v or '≥ 2' in iso_v or 'LOC' in iso_v: ec_s, ec_r, alp, n = 0.74, 50.9, 9.4, 5.2
+                    elif 'mecanico' in iso_v.lower(): ec_s, ec_r, alp, n = 0.83, 1.3, 0.9, 2.7
+                K50, K95 = (50.0/50.0)**(1.0/n), ((5.0/95.0)**(1.0/n) if is_waking else (95.0/5.0)**(1.0/n))
+                res.update({'x95': FM.greco_iso_cs(ce_y,ec_s,ec_r,alp,n,0.95,is_waking), 'x50': FM.greco_iso_cs(ce_y,ec_s,ec_r,alp,n,0.50,is_waking), 'base_95': ec_s*K95, 'base_50': ec_s*K50, 'unit': 'ug/ml' if is_prop else '%'})
+
+        elif farmaco == 'Ketamina':
+            if 'Jonkman 2018' in iso_v:
+                res.update({'x95': FM.jonkman_2018_iso_cx(ce_y,0.50,'remi'), 'x50': FM.jonkman_2018_iso_cx(ce_y,0.80,'remi'), 'base_95': FM.jonkman_2018_iso_cx(0.0,0.50,'remi'), 'base_50': FM.jonkman_2018_iso_cx(0.0,0.80,'remi'), 'unit': 'ng/ml'})
+            elif 'Hui 1995' in iso_v:
+                ef_str = 'Tolerancia al Estímulo Eléctrico' if 'Eléctrico' in iso_v else 'LOC'
+                res.update({'x95': FM.hui_1995_iso_cx(ce_y,0.95,ef_str,'prop'), 'x50': FM.hui_1995_iso_cx(ce_y,0.50,ef_str,'prop'), 'base_95': FM.hui_1995_iso_cx(0.0,0.95,ef_str,'prop'), 'base_50': FM.hui_1995_iso_cx(0.0,0.50,ef_str,'prop'), 'unit': 'ug/ml'})
+            elif 'Hamp 2018' in iso_v:
+                res.update({'x95': np.full_like(ce_y, np.nan), 'x50': FM.hamp_2018_iso_csevo(ce_y, 0.50), 'base_95': np.nan, 'base_50': 2.2, 'unit': '%'})
+
+        return res
 
 # ==========================================
 # 3. FARMACOCINÉTICA (PK) Y PROTECCIÓN
@@ -606,89 +739,249 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             pd_arrays['Factor Tolerancia al Estimulo Mecanico (Abad 2022)'] = FarmacoMatematica.hill(Ce, 2.8, 1.9, 1.0, 3.88).tolist()
 
     # === INTERACCIONES PD (ISOBOLAS Y 3D) ===
-    isobolas = {}
+    isobolas_clasicas = {}
     superficie_3d = {}
+    grafico_dinamico_iso = {"activo": False}
 
     if 'Pediátrico' not in datos.modelo_pk or datos.farmaco == 'Ketamina':
         base_max = max(np.max(Cp), np.max(Ce)) * 1.1 if max(np.max(Cp), np.max(Ce)) > 0 else 10.0
         if datos.farmaco == 'Ketamina': max_y = max(base_max, 1000.0)
         else: max_y = max(base_max, 15.0)
         
-        ce_y = np.linspace(0, max_y, 100)
-        isobolas['ce_farmaco'] = ce_y.tolist()
+        # 1. MODO CLÁSICO (100 puntos en Y fijos)
+        ce_y_clasico = np.linspace(0, max_y, 100)
+        isobolas_clasicas['ce_farmaco'] = ce_y_clasico.tolist()
         
-        if datos.farmaco == 'Fentanilo':
-            b_50 = max(1.0, 4.9 - 0.09*(datos.edad_anos - 20)); b_95 = b_50*(5.4/3.3); fr_sm = (0.50*ce_y)/(0.75+ce_y)
-            isobolas['Propofol LOC (Smith 1994)'] = {'ce_50': clean_arr(b_50*(1-fr_sm)), 'ce_95': clean_arr(b_95*(1-fr_sm))}
-            fr_som = (0.95*ce_y**1.4)/(0.63**1.4+ce_y**1.4)
-            isobolas['Propofol No Movimiento (Smith 1994)'] = {'ce_50': clean_arr(15.2*(1-fr_som)), 'ce_95': clean_arr(27.4*(1-fr_som))}
+        # Generar las isóbolas clásicas
+        isobolas_tmp = {}
+        for c_y in [ce_y_clasico]:
+            if datos.farmaco == 'Fentanilo':
+                b_50 = max(1.0, 4.9 - 0.09*(datos.edad_anos - 20)); b_95 = b_50*(5.4/3.3); fr_sm = (0.50*c_y)/(0.75+c_y)
+                isobolas_tmp['Propofol LOC (Smith 1994)'] = {'ce_50': b_50*(1-fr_sm), 'ce_95': b_95*(1-fr_sm), 'base_50': b_50, 'base_95': b_95, 'unit': 'ug/ml'}
+                fr_som = (0.95*c_y**1.4)/(0.63**1.4+c_y**1.4)
+                isobolas_tmp['Propofol No Movimiento (Smith 1994)'] = {'ce_50': 15.2*(1-fr_som), 'ce_95': 27.4*(1-fr_som), 'base_50': 15.2, 'base_95': 27.4, 'unit': 'ug/ml'}
+                
+                eff_map_kazama = {
+                    'Propofol ↓ FC 15% (Kazama 1998)': 'Disminución FC 15%', 'Propofol ↓ FC 30% (Kazama 1998)': 'Disminución FC 30%',
+                    'Propofol No Movimiento (Kazama 1998)': 'Respuesta Somática', 'Propofol No ↑ PAS 15% (Kazama 1998)': 'Supresión Aumento PAS 15%',
+                    'Propofol ↓ PAS 15% (Kazama 1998)': 'Disminución PAS 15%', 'Propofol ↓ PAS 30% (Kazama 1998)': 'Disminución PAS 30%',
+                    'Propofol ↓ PAS 40% (Kazama 1998)': 'Disminución PAS 40%'
+                }
+                for ui_name, eff in eff_map_kazama.items():
+                    isobolas_tmp[ui_name] = {'ce_50': FarmacoMatematica.kazama_1998_iso_cprop(c_y, 0.50, eff), 'ce_95': FarmacoMatematica.kazama_1998_iso_cprop(c_y, 0.95, eff), 'base_50': FarmacoMatematica.kazama_1998_iso_cprop(0.0, 0.50, eff), 'base_95': FarmacoMatematica.kazama_1998_iso_cprop(0.0, 0.95, eff), 'unit': 'ug/ml'}
+                
+                eff_map_katoh = {
+                    'Sevoflurano LOC (Katoh 1998)': 'LOC 1998', 'Sevoflurano No ↑ FC 15% / ↑ MAP 15% (Katoh 1999)': 'Simpática 1999',
+                    'Sevoflurano No Movimiento (Katoh 1998)': 'Somática 1998', 'Sevoflurano No Movimiento (Katoh 1999)': 'Somática 1999'
+                }
+                for ui_name, eff in eff_map_katoh.items():
+                    b50 = 0.62 if 'LOC' in eff else (1.84 if 'Somática 1998' == eff else (1.85 if 'Somática 1999' == eff else 4.15))
+                    b95 = 0.71 if 'LOC' in eff else (2.21 if 'Somática 1998' == eff else (2.28 if 'Somática 1999' == eff else 6.26))
+                    isobolas_tmp[ui_name] = {'ce_50': FarmacoMatematica.katoh_iso_csevo(c_y, 0.50, eff), 'ce_95': FarmacoMatematica.katoh_iso_csevo(c_y, 0.95, eff), 'base_50': b50, 'base_95': b95, 'unit': '%'}
+                
+                isobolas_tmp['Sevoflurano No Movimiento (Vereecke 2013)'] = {'ce_50': FarmacoMatematica.vereecke_iso_cs(c_y, 1.73, 2.07, 0.931, 6.40, 0.50), 'ce_95': FarmacoMatematica.vereecke_iso_cs(c_y, 1.73, 2.07, 0.931, 6.40, 0.95), 'base_50': 1.73, 'base_95': (19.0**(1.0/6.40))*1.73, 'unit': '%'}
+                isobolas_tmp['Sevoflurano No ↑ FC 15% / ↑ PAS 15% (Vereecke 2013)'] = {'ce_50': FarmacoMatematica.vereecke_iso_cs(c_y, 4.60, 0.43, 0.931, 6.40, 0.50), 'ce_95': FarmacoMatematica.vereecke_iso_cs(c_y, 4.60, 0.43, 0.931, 6.40, 0.95), 'base_50': 4.60, 'base_95': (19.0**(1.0/6.40))*4.60, 'unit': '%'}
+                isobolas_tmp['Propofol Tolerancia LMA ΔANI < 20% (Wang 2026)'] = {'ce_50': FarmacoMatematica.wang_2026_iso_cm(c_y, 9.77, 0.50), 'ce_95': FarmacoMatematica.wang_2026_iso_cm(c_y, 9.77, 0.95), 'base_50': 9.77, 'base_95': 9.77, 'unit': 'ug/ml'}
+                isobolas_tmp['Sevoflurano Tolerancia LMA ΔANI < 20% (Wang 2026)'] = {'ce_50': FarmacoMatematica.wang_2026_iso_cm(c_y, 4.29, 0.50), 'ce_95': FarmacoMatematica.wang_2026_iso_cm(c_y, 4.29, 0.95), 'base_50': 4.29, 'base_95': 4.29, 'unit': '%'}
             
-            eff_map_kazama = {
-                'Propofol ↓ FC 15% (Kazama 1998)': 'Disminución FC 15%', 'Propofol ↓ FC 30% (Kazama 1998)': 'Disminución FC 30%',
-                'Propofol No Movimiento (Kazama 1998)': 'Respuesta Somática', 'Propofol No ↑ PAS 15% (Kazama 1998)': 'Supresión Aumento PAS 15%',
-                'Propofol ↓ PAS 15% (Kazama 1998)': 'Disminución PAS 15%', 'Propofol ↓ PAS 30% (Kazama 1998)': 'Disminución PAS 30%',
-                'Propofol ↓ PAS 40% (Kazama 1998)': 'Disminución PAS 40%'
-            }
-            for ui_name, eff in eff_map_kazama.items():
-                isobolas[ui_name] = {'ce_50': clean_arr(FarmacoMatematica.kazama_1998_iso_cprop(ce_y, 0.50, eff)), 'ce_95': clean_arr(FarmacoMatematica.kazama_1998_iso_cprop(ce_y, 0.95, eff))}
-            
-            eff_map_katoh = {
-                'Sevoflurano LOC (Katoh 1998)': 'LOC 1998', 'Sevoflurano No ↑ FC 15% / ↑ MAP 15% (Katoh 1999)': 'Simpática 1999',
-                'Sevoflurano No Movimiento (Katoh 1998)': 'Somática 1998', 'Sevoflurano No Movimiento (Katoh 1999)': 'Somática 1999'
-            }
-            for ui_name, eff in eff_map_katoh.items():
-                isobolas[ui_name] = {'ce_50': clean_arr(FarmacoMatematica.katoh_iso_csevo(ce_y, 0.50, eff)), 'ce_95': clean_arr(FarmacoMatematica.katoh_iso_csevo(ce_y, 0.95, eff))}
-            
-            isobolas['Sevoflurano No Movimiento (Vereecke 2013)'] = {'ce_50': clean_arr(FarmacoMatematica.vereecke_iso_cs(ce_y, 1.73, 2.07, 0.931, 6.40, 0.50)), 'ce_95': clean_arr(FarmacoMatematica.vereecke_iso_cs(ce_y, 1.73, 2.07, 0.931, 6.40, 0.95))}
-            isobolas['Sevoflurano No ↑ FC 15% / ↑ PAS 15% (Vereecke 2013)'] = {'ce_50': clean_arr(FarmacoMatematica.vereecke_iso_cs(ce_y, 4.60, 0.43, 0.931, 6.40, 0.50)), 'ce_95': clean_arr(FarmacoMatematica.vereecke_iso_cs(ce_y, 4.60, 0.43, 0.931, 6.40, 0.95))}
-            isobolas['Propofol Tolerancia LMA ΔANI < 20% (Wang 2026)'] = {'ce_50': clean_arr(FarmacoMatematica.wang_2026_iso_cm(ce_y, 9.77, 0.50)), 'ce_95': clean_arr(FarmacoMatematica.wang_2026_iso_cm(ce_y, 9.77, 0.95))}
-            isobolas['Sevoflurano Tolerancia LMA ΔANI < 20% (Wang 2026)'] = {'ce_50': clean_arr(FarmacoMatematica.wang_2026_iso_cm(ce_y, 4.29, 0.50)), 'ce_95': clean_arr(FarmacoMatematica.wang_2026_iso_cm(ce_y, 4.29, 0.95))}
-        
-        elif datos.farmaco == 'Remifentanilo':
-            # SOLUCIÓN JONKMAN 1: El fármaco principal es Remifentanilo (Eje Y). Despejamos Ketamina (solve_for='ket')
-            isobolas['Ketamina Probabilidad de Conservar la Ventilación Minuto (Jonkman 2018)'] = {'ce_50': clean_arr(FarmacoMatematica.jonkman_2018_iso_cx(ce_y, 0.50, solve_for='ket')), 'ce_80': clean_arr(FarmacoMatematica.jonkman_2018_iso_cx(ce_y, 0.80, solve_for='ket'))}
-            isobolas['Propofol BIS (Bouillon 2004)'] = {'ce_50': clean_arr(FarmacoMatematica.bouillon_2004_bis_iso_cprop(ce_y, 60.0)), 'ce_95': clean_arr(FarmacoMatematica.bouillon_2004_bis_iso_cprop(ce_y, 40.0))}
-            isobolas['Propofol LOC (Bouillon 2004)'] = {'ce_50': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.50, 'LOC')), 'ce_95': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.95, 'LOC'))}
-            isobolas['Propofol Tolerancia Laringoscopia (Bouillon 2004)'] = {'ce_50': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.50, 'Laringoscopia')), 'ce_95': clean_arr(FarmacoMatematica.bouillon_2004_iso_cprop(ce_y, 0.95, 'Laringoscopia'))}
+            elif datos.farmaco == 'Remifentanilo':
+                isobolas_tmp['Ketamina Probabilidad de Conservar la Ventilación Minuto (Jonkman 2018)'] = {'ce_50': FarmacoMatematica.jonkman_2018_iso_cx(c_y, 0.50, solve_for='ket'), 'ce_95': FarmacoMatematica.jonkman_2018_iso_cx(c_y, 0.80, solve_for='ket'), 'base_50': FarmacoMatematica.jonkman_2018_iso_cx(0.0, 0.50, 'ket'), 'base_95': FarmacoMatematica.jonkman_2018_iso_cx(0.0, 0.80, 'ket'), 'unit': 'ng/ml'}
+                isobolas_tmp['Propofol BIS (Bouillon 2004)'] = {'ce_50': FarmacoMatematica.bouillon_2004_bis_iso_cprop(c_y, 60.0), 'ce_95': FarmacoMatematica.bouillon_2004_bis_iso_cprop(c_y, 40.0), 'base_50': FarmacoMatematica.bouillon_2004_bis_iso_cprop(0.0, 60.0), 'base_95': FarmacoMatematica.bouillon_2004_bis_iso_cprop(0.0, 40.0), 'unit': 'ug/ml'}
+                isobolas_tmp['Propofol LOC (Bouillon 2004)'] = {'ce_50': FarmacoMatematica.bouillon_2004_iso_cprop(c_y, 0.50, 'LOC'), 'ce_95': FarmacoMatematica.bouillon_2004_iso_cprop(c_y, 0.95, 'LOC'), 'base_50': FarmacoMatematica.bouillon_2004_iso_cprop(0.0, 0.50, 'LOC'), 'base_95': FarmacoMatematica.bouillon_2004_iso_cprop(0.0, 0.95, 'LOC'), 'unit': 'ug/ml'}
+                isobolas_tmp['Propofol Tolerancia Laringoscopia (Bouillon 2004)'] = {'ce_50': FarmacoMatematica.bouillon_2004_iso_cprop(c_y, 0.50, 'Laringoscopia'), 'ce_95': FarmacoMatematica.bouillon_2004_iso_cprop(c_y, 0.95, 'Laringoscopia'), 'base_50': FarmacoMatematica.bouillon_2004_iso_cprop(0.0, 0.50, 'Laringoscopia'), 'base_95': FarmacoMatematica.bouillon_2004_iso_cprop(0.0, 0.95, 'Laringoscopia'), 'unit': 'ug/ml'}
+                
+                isobolas_tmp['Propofol PSI-2 (Kuizenga 2019)'] = {'ce_50': FarmacoMatematica.kuizenga_2019_iso_c('Propofol', 'PSI', c_y, 50.0), 'ce_95': FarmacoMatematica.kuizenga_2019_iso_c('Propofol', 'PSI', c_y, 25.0), 'base_50': FarmacoMatematica.kuizenga_2019_iso_c('Propofol', 'PSI', 0.0, 50.0), 'base_95': FarmacoMatematica.kuizenga_2019_iso_c('Propofol', 'PSI', 0.0, 25.0), 'unit': 'ug/ml'}
+                isobolas_tmp['Sevoflurano PSI-2 (Kuizenga 2019)'] = {'ce_50': FarmacoMatematica.kuizenga_2019_iso_c('Sevoflurano', 'PSI', c_y, 50.0), 'ce_95': FarmacoMatematica.kuizenga_2019_iso_c('Sevoflurano', 'PSI', c_y, 25.0), 'base_50': FarmacoMatematica.kuizenga_2019_iso_c('Sevoflurano', 'PSI', 0.0, 50.0), 'base_95': FarmacoMatematica.kuizenga_2019_iso_c('Sevoflurano', 'PSI', 0.0, 25.0), 'unit': '%'}
 
-            p_greco = {
-                'Propofol MOAA/S ≤ 1 (Johnson 2008)': (2.2, 33.1, 3.6, 5.0, False), 'Propofol MOAA/S ≤ 3 (Kern 2004)': (1.8, 12.5, 5.1, 5.8, False),
-                'Propofol MOAA/S ≥ 2 (Johnson 2008)': (1.3, 10.5, 2.8, 3.5, True), 'Propofol MOAA/S ≥ 4 (Kern 2004)': (1.8, 12.5, 5.1, 5.8, True),
-                'Propofol Tolerancia al Estimulo Electrico (Kern 2004)': (4.56, 21.3, 14.7, 6.0, False), 'Propofol Tolerancia al Estimulo Mecanico (Kern 2004)': (4.16, 8.84, 8.2, 8.3, False),
-                'Propofol Tolerancia Laringoscopia (Kern 2004)': (5.60, 48.9, 33.2, 2.2, False), 'Sevoflurano MOAA/S ≤ 1 (Johnson 2010)': (0.74, 50.9, 9.4, 5.2, False),
-                'Sevoflurano MOAA/S ≥ 2 (Johnson 2010)': (0.74, 50.9, 9.4, 5.2, True), 'Sevoflurano Tolerancia al estimulo mecanico (Johnson 2010)': (0.83, 1.3, 0.9, 2.7, False)
-            }
-            for k, v in p_greco.items(): isobolas[k] = {'ce_50': clean_arr(FarmacoMatematica.greco_iso_cs(ce_y, v[0], v[1], v[2], v[3], 0.50, v[4])), 'ce_95': clean_arr(FarmacoMatematica.greco_iso_cs(ce_y, v[0], v[1], v[2], v[3], 0.95, v[4]))}
-            isobolas["Sevoflurano BIS (Manyam 2007)"] = {'ce_50': clean_arr(FarmacoMatematica.greco_iso_cs(ce_y, 2.37, 38.02, 0.52, 1.12, 0.60, True)), 'ce_95': clean_arr(FarmacoMatematica.greco_iso_cs(ce_y, 2.37, 38.02, 0.52, 1.12, 0.40, True))}
+                p_greco = {
+                    'Propofol MOAA/S ≤ 1 (Johnson 2008)': (2.2, 33.1, 3.6, 5.0, False), 'Propofol MOAA/S ≤ 3 (Kern 2004)': (1.8, 12.5, 5.1, 5.8, False),
+                    'Propofol MOAA/S ≥ 2 (Johnson 2008)': (1.3, 10.5, 2.8, 3.5, True), 'Propofol MOAA/S ≥ 4 (Kern 2004)': (1.8, 12.5, 5.1, 5.8, True),
+                    'Propofol Tolerancia al Estimulo Electrico (Kern 2004)': (4.56, 21.3, 14.7, 6.0, False), 'Propofol Tolerancia al Estimulo Mecanico (Kern 2004)': (4.16, 8.84, 8.2, 8.3, False),
+                    'Propofol Tolerancia Laringoscopia (Kern 2004)': (5.60, 48.9, 33.2, 2.2, False), 'Sevoflurano MOAA/S ≤ 1 (Johnson 2010)': (0.74, 50.9, 9.4, 5.2, False),
+                    'Sevoflurano MOAA/S ≥ 2 (Johnson 2010)': (0.74, 50.9, 9.4, 5.2, True), 'Sevoflurano Tolerancia al estimulo mecanico (Johnson 2010)': (0.83, 1.3, 0.9, 2.7, False)
+                }
+                for k, v in p_greco.items():
+                    k50, k95 = (50.0/50.0)**(1.0/v[3]), ((5.0/95.0)**(1.0/v[3]) if v[4] else (95.0/5.0)**(1.0/v[3]))
+                    isobolas_tmp[k] = {'ce_50': FarmacoMatematica.greco_iso_cs(c_y, v[0], v[1], v[2], v[3], 0.50, v[4]), 'ce_95': FarmacoMatematica.greco_iso_cs(c_y, v[0], v[1], v[2], v[3], 0.95, v[4]), 'base_50': v[0]*k50, 'base_95': v[0]*k95, 'unit': 'ug/ml' if 'Propofol' in k else '%'}
+                
+                isobolas_tmp["Sevoflurano BIS (Manyam 2007)"] = {'ce_50': FarmacoMatematica.greco_iso_cs(c_y, 2.37, 38.02, 0.52, 1.12, 0.60, True), 'ce_95': FarmacoMatematica.greco_iso_cs(c_y, 2.37, 38.02, 0.52, 1.12, 0.40, True), 'base_50': 2.37*((100.0/60 - 1.0)**(1.0/1.12)), 'base_95': 2.37*((100.0/40 - 1.0)**(1.0/1.12)), 'unit': '%'}
 
-            p_man = {
-                'Sevoflurano MOAA/S ≤ 1 (Manyam 2006)': (7.30, 7.84, 0.23, 3.94), 'Sevoflurano MOAA/S ≥ 4 (Manyam 2006)': (4.19, 4.25, 0.28, 0.58),
-                'Sevoflurano Tolerancia al estimulo mecanico (Manyam 2006)': (3.82, 2.43, 0.54, 1.27), 'Sevoflurano Tolerancia al estimulo termico (Manyam 2006)': (3.38, 1.32, 0.55, 3.47),
-                'Sevoflurano Tolerancia al estimulo electrico (Manyam 2006)': (3.27, 0.97, 0.088, 1.09), 'Sevoflurano Tolerancia Laringoscopia (Manyam 2006)': (3.70, 2.36, 0.54, 1.22)
-            }
-            for k, v in p_man.items(): isobolas[k] = {'ce_50': clean_arr(FarmacoMatematica.manyam_iso_cs(ce_y, v[0], v[1], v[2], v[3], 0.50)), 'ce_95': clean_arr(FarmacoMatematica.manyam_iso_cs(ce_y, v[0], v[1], v[2], v[3], 0.95))}
+                p_man = {
+                    'Sevoflurano MOAA/S ≤ 1 (Manyam 2006)': (7.30, 7.84, 0.23, 3.94), 'Sevoflurano MOAA/S ≥ 4 (Manyam 2006)': (4.19, 4.25, 0.28, 0.58),
+                    'Sevoflurano Tolerancia al estimulo mecanico (Manyam 2006)': (3.82, 2.43, 0.54, 1.27), 'Sevoflurano Tolerancia al estimulo termico (Manyam 2006)': (3.38, 1.32, 0.55, 3.47),
+                    'Sevoflurano Tolerancia al estimulo electrico (Manyam 2006)': (3.27, 0.97, 0.088, 1.09), 'Sevoflurano Tolerancia Laringoscopia (Manyam 2006)': (3.70, 2.36, 0.54, 1.22)
+                }
+                for k, v in p_man.items():
+                    isobolas_tmp[k] = {'ce_50': FarmacoMatematica.manyam_iso_cs(c_y, v[0], v[1], v[2], v[3], 0.50), 'ce_95': FarmacoMatematica.manyam_iso_cs(c_y, v[0], v[1], v[2], v[3], 0.95), 'base_50': v[0]/v[1], 'base_95': (v[0]+2.9444)/v[1], 'unit': '%'}
 
-            e0_bis, gam_bis, c50_r_bis, c50_s_bisp, c50_s_biso = 89.5, 1.88, 27.3, 2.29, 1.99
-            isobolas['Sevoflurano BIS post-Laringoscopia (Heyse 2014)'] = {'ce_50': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 60.0, e0_bis, c50_s_bisp, c50_r_bis, gam_bis)), 'ce_95': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 40.0, e0_bis, c50_s_bisp, c50_r_bis, gam_bis))}
-            isobolas['Sevoflurano BIS pre-Laringoscopia (Heyse 2014)'] = {'ce_50': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 60.0, e0_bis, c50_s_biso, c50_r_bis, gam_bis)), 'ce_95': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 40.0, e0_bis, c50_s_biso, c50_r_bis, gam_bis))}
+                e0_bis, gam_bis, c50_r_bis, c50_s_bisp, c50_s_biso = 89.5, 1.88, 27.3, 2.29, 1.99
+                isobolas_tmp['Sevoflurano BIS post-Laringoscopia (Heyse 2014)'] = {'ce_50': FarmacoMatematica.heyse_2014_iso_csevo(c_y, 60.0, e0_bis, c50_s_bisp, c50_r_bis, gam_bis), 'ce_95': FarmacoMatematica.heyse_2014_iso_csevo(c_y, 40.0, e0_bis, c50_s_bisp, c50_r_bis, gam_bis), 'base_50': FarmacoMatematica.heyse_2014_iso_csevo(0.0, 60.0, e0_bis, c50_s_bisp, c50_r_bis, gam_bis), 'base_95': FarmacoMatematica.heyse_2014_iso_csevo(0.0, 40.0, e0_bis, c50_s_bisp, c50_r_bis, gam_bis), 'unit': '%'}
+                isobolas_tmp['Sevoflurano BIS pre-Laringoscopia (Heyse 2014)'] = {'ce_50': FarmacoMatematica.heyse_2014_iso_csevo(c_y, 60.0, e0_bis, c50_s_biso, c50_r_bis, gam_bis), 'ce_95': FarmacoMatematica.heyse_2014_iso_csevo(c_y, 40.0, e0_bis, c50_s_biso, c50_r_bis, gam_bis), 'base_50': FarmacoMatematica.heyse_2014_iso_csevo(0.0, 60.0, e0_bis, c50_s_biso, c50_r_bis, gam_bis), 'base_95': FarmacoMatematica.heyse_2014_iso_csevo(0.0, 40.0, e0_bis, c50_s_biso, c50_r_bis, gam_bis), 'unit': '%'}
+                
+                e0_se, gam_se, c50_r_se, c50_s_sep, c50_s_seo = 97.1, 1.87, 16.2, 2.13, 1.82
+                isobolas_tmp['Sevoflurano SE post-Laringoscopia (Heyse 2014)'] = {'ce_50': FarmacoMatematica.heyse_2014_iso_csevo(c_y, 60.0, e0_se, c50_s_sep, c50_r_se, gam_se), 'ce_95': FarmacoMatematica.heyse_2014_iso_csevo(c_y, 40.0, e0_se, c50_s_sep, c50_r_se, gam_se), 'base_50': FarmacoMatematica.heyse_2014_iso_csevo(0.0, 60.0, e0_se, c50_s_sep, c50_r_se, gam_se), 'base_95': FarmacoMatematica.heyse_2014_iso_csevo(0.0, 40.0, e0_se, c50_s_sep, c50_r_se, gam_se), 'unit': '%'}
+                isobolas_tmp['Sevoflurano SE pre-Laringoscopia (Heyse 2014)'] = {'ce_50': FarmacoMatematica.heyse_2014_iso_csevo(c_y, 60.0, e0_se, c50_s_seo, c50_r_se, gam_se), 'ce_95': FarmacoMatematica.heyse_2014_iso_csevo(c_y, 40.0, e0_se, c50_s_seo, c50_r_se, gam_se), 'base_50': FarmacoMatematica.heyse_2014_iso_csevo(0.0, 60.0, e0_se, c50_s_seo, c50_r_se, gam_se), 'base_95': FarmacoMatematica.heyse_2014_iso_csevo(0.0, 40.0, e0_se, c50_s_seo, c50_r_se, gam_se), 'unit': '%'}
+                
+                e0_re, gam_re, c50_r_re, c50_s_rep, c50_s_reo = 103.0, 2.08, 18.2, 2.24, 1.88
+                isobolas_tmp['Sevoflurano RE post-Laringoscopia (Heyse 2014)'] = {'ce_50': FarmacoMatematica.heyse_2014_iso_csevo(c_y, 60.0, e0_re, c50_s_rep, c50_r_re, gam_re), 'ce_95': FarmacoMatematica.heyse_2014_iso_csevo(c_y, 40.0, e0_re, c50_s_reo, c50_r_re, gam_re), 'base_50': FarmacoMatematica.heyse_2014_iso_csevo(0.0, 60.0, e0_re, c50_s_rep, c50_r_re, gam_re), 'base_95': FarmacoMatematica.heyse_2014_iso_csevo(0.0, 40.0, e0_re, c50_s_reo, c50_r_re, gam_re), 'unit': '%'}
+                isobolas_tmp['Sevoflurano RE pre-Laringoscopia (Heyse 2014)'] = {'ce_50': FarmacoMatematica.heyse_2014_iso_csevo(c_y, 60.0, e0_re, c50_s_reo, c50_r_re, gam_re), 'ce_95': FarmacoMatematica.heyse_2014_iso_csevo(c_y, 40.0, e0_re, c50_s_reo, c50_r_re, gam_re), 'base_50': FarmacoMatematica.heyse_2014_iso_csevo(0.0, 60.0, e0_re, c50_s_reo, c50_r_re, gam_re), 'base_95': FarmacoMatematica.heyse_2014_iso_csevo(0.0, 40.0, e0_re, c50_s_reo, c50_r_re, gam_re), 'unit': '%'}
+
+            elif datos.farmaco == 'Ketamina':
+                isobolas_tmp['Remifentanilo Probabilidad de Conservar la Ventilación Minuto (Jonkman 2018)'] = {'ce_50': FarmacoMatematica.jonkman_2018_iso_cx(c_y, 0.50, solve_for='remi'), 'ce_95': FarmacoMatematica.jonkman_2018_iso_cx(c_y, 0.80, solve_for='remi'), 'base_50': FarmacoMatematica.jonkman_2018_iso_cx(0.0, 0.50, 'remi'), 'base_95': FarmacoMatematica.jonkman_2018_iso_cx(0.0, 0.80, 'remi'), 'unit': 'ng/ml'}
+                isobolas_tmp['Propofol LOC (Hui 1995)'] = {'ce_50': FarmacoMatematica.hui_1995_iso_cx(c_y, 0.50, efecto='LOC', solve_for='prop'), 'ce_95': FarmacoMatematica.hui_1995_iso_cx(c_y, 0.95, efecto='LOC', solve_for='prop'), 'base_50': FarmacoMatematica.hui_1995_iso_cx(0.0, 0.50, efecto='LOC', solve_for='prop'), 'base_95': FarmacoMatematica.hui_1995_iso_cx(0.0, 0.95, efecto='LOC', solve_for='prop'), 'unit': 'ug/ml'}
+                isobolas_tmp['Propofol Tolerancia al Estímulo Eléctrico (Hui 1995)'] = {'ce_50': FarmacoMatematica.hui_1995_iso_cx(c_y, 0.50, efecto='Tolerancia al Estímulo Eléctrico', solve_for='prop'), 'ce_95': FarmacoMatematica.hui_1995_iso_cx(c_y, 0.95, efecto='Tolerancia al Estímulo Eléctrico', solve_for='prop'), 'base_50': FarmacoMatematica.hui_1995_iso_cx(0.0, 0.50, efecto='Tolerancia al Estímulo Eléctrico', solve_for='prop'), 'base_95': FarmacoMatematica.hui_1995_iso_cx(0.0, 0.95, efecto='Tolerancia al Estímulo Eléctrico', solve_for='prop'), 'unit': 'ug/ml'}
+                isobolas_tmp['Sevoflurano No Movimiento (Hamp 2018)'] = {'ce_50': FarmacoMatematica.hamp_2018_iso_csevo(c_y, 0.50), 'ce_95': np.full_like(c_y, np.nan), 'base_50': 2.2, 'base_95': np.nan, 'unit': '%'}
+
+        for k, v in isobolas_tmp.items():
+            isobolas_clasicas[k] = {'ce_50': clean_arr(v['ce_50']), 'ce_95': clean_arr(v['ce_95'])}
             
-            e0_se, gam_se, c50_r_se, c50_s_sep, c50_s_seo = 97.1, 1.87, 16.2, 2.13, 1.82
-            isobolas['Sevoflurano SE post-Laringoscopia (Heyse 2014)'] = {'ce_50': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 60.0, e0_se, c50_s_sep, c50_r_se, gam_se)), 'ce_95': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 40.0, e0_se, c50_s_sep, c50_r_se, gam_se))}
-            isobolas['Sevoflurano SE pre-Laringoscopia (Heyse 2014)'] = {'ce_50': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 60.0, e0_se, c50_s_seo, c50_r_se, gam_se)), 'ce_95': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 40.0, e0_se, c50_s_seo, c50_r_se, gam_se))}
+        # 2. MODO DINÁMICO (Evaluado sobre el arreglo Ce real en el tiempo)
+        if datos.isobolograma_2d != "Ninguno" and datos.isobolograma_2d in isobolas_tmp and datos.tipo_grafico_iso != "Clásico":
+            req_dict = isobolas_tmp[datos.isobolograma_2d]
+            ce_dinamico = Ce # Array completo (14401 pts)
             
-            e0_re, gam_re, c50_r_re, c50_s_rep, c50_s_reo = 103.0, 2.08, 18.2, 2.24, 1.88
-            isobolas['Sevoflurano RE post-Laringoscopia (Heyse 2014)'] = {'ce_50': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 60.0, e0_re, c50_s_rep, c50_r_re, gam_re)), 'ce_95': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 40.0, e0_re, c50_s_reo, c50_r_re, gam_re))}
-            isobolas['Sevoflurano RE pre-Laringoscopia (Heyse 2014)'] = {'ce_50': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 60.0, e0_re, c50_s_reo, c50_r_re, gam_re)), 'ce_95': clean_arr(FarmacoMatematica.heyse_2014_iso_csevo(ce_y, 40.0, e0_re, c50_s_reo, c50_r_re, gam_re))}
+            # Recalculamos los requerimientos exactos pero sobre Ce dinámico
+            if datos.farmaco == 'Fentanilo':
+                if 'Smith 1994' in datos.isobolograma_2d:
+                    b_50 = req_dict['base_50']; b_95 = req_dict['base_95']
+                    p_val, g_val, c50_f = (0.50, 1.0, 0.75) if 'LOC' in datos.isobolograma_2d else (0.95, 1.4, 0.63)
+                    fr_y = (p_val*ce_dinamico**g_val)/(c50_f**g_val+ce_dinamico**g_val)
+                    req50_arr = b_50*(1-fr_y); req95_arr = b_95*(1-fr_y)
+                elif 'Kazama 1998' in datos.isobolograma_2d:
+                    eff = next((v for k, v in eff_map_kazama.items() if k in datos.isobolograma_2d), 'Respuesta Somática')
+                    req50_arr = FarmacoMatematica.kazama_1998_iso_cprop(ce_dinamico, 0.50, eff)
+                    req95_arr = FarmacoMatematica.kazama_1998_iso_cprop(ce_dinamico, 0.95, eff)
+                elif 'Katoh' in datos.isobolograma_2d:
+                    eff = next((v for k, v in eff_map_katoh.items() if k in datos.isobolograma_2d), 'LOC 1998')
+                    req50_arr = FarmacoMatematica.katoh_iso_csevo(ce_dinamico, 0.50, eff)
+                    req95_arr = FarmacoMatematica.katoh_iso_csevo(ce_dinamico, 0.95, eff)
+                elif 'Vereecke 2013' in datos.isobolograma_2d:
+                    is_mov = 'Movimiento' in datos.isobolograma_2d; c50_f = 2.07 if is_mov else 0.43; c50_s = 1.73 if is_mov else 4.60
+                    req50_arr = FarmacoMatematica.vereecke_iso_cs(ce_dinamico, c50_s, c50_f, 0.931, 6.40, 0.50)
+                    req95_arr = FarmacoMatematica.vereecke_iso_cs(ce_dinamico, c50_s, c50_f, 0.931, 6.40, 0.95)
+                elif 'Wang 2026' in datos.isobolograma_2d:
+                    is_prop = 'Propofol' in datos.isobolograma_2d; c50_m = 9.77 if is_prop else 4.29
+                    req50_arr = FarmacoMatematica.wang_2026_iso_cm(ce_dinamico, c50_m, 0.50)
+                    req95_arr = FarmacoMatematica.wang_2026_iso_cm(ce_dinamico, c50_m, 0.95)
+            
+            elif datos.farmaco == 'Remifentanilo':
+                if 'Jonkman' in datos.isobolograma_2d:
+                    req50_arr = FarmacoMatematica.jonkman_2018_iso_cx(ce_dinamico, 0.50, 'ket')
+                    req95_arr = FarmacoMatematica.jonkman_2018_iso_cx(ce_dinamico, 0.80, 'ket')
+                elif 'Bouillon 2004' in datos.isobolograma_2d:
+                    if 'BIS' in datos.isobolograma_2d:
+                        req50_arr = FarmacoMatematica.bouillon_2004_bis_iso_cprop(ce_dinamico, 60.0)
+                        req95_arr = FarmacoMatematica.bouillon_2004_bis_iso_cprop(ce_dinamico, 40.0)
+                    else:
+                        eff_str = 'LOC' if 'LOC' in datos.isobolograma_2d else 'Laringoscopia'
+                        req50_arr = FarmacoMatematica.bouillon_2004_iso_cprop(ce_dinamico, 0.50, eff_str)
+                        req95_arr = FarmacoMatematica.bouillon_2004_iso_cprop(ce_dinamico, 0.95, eff_str)
+                elif 'Kuizenga 2019' in datos.isobolograma_2d:
+                    f_str = 'Propofol' if 'Propofol' in datos.isobolograma_2d else 'Sevoflurano'
+                    req50_arr = FarmacoMatematica.kuizenga_2019_iso_c(f_str, 'PSI', ce_dinamico, 50.0)
+                    req95_arr = FarmacoMatematica.kuizenga_2019_iso_c(f_str, 'PSI', ce_dinamico, 25.0)
+                elif 'Kern 2004' in datos.isobolograma_2d or 'Johnson' in datos.isobolograma_2d:
+                    v = p_greco[datos.isobolograma_2d]
+                    req50_arr = FarmacoMatematica.greco_iso_cs(ce_dinamico, v[0], v[1], v[2], v[3], 0.50, v[4])
+                    req95_arr = FarmacoMatematica.greco_iso_cs(ce_dinamico, v[0], v[1], v[2], v[3], 0.95, v[4])
+                elif 'Manyam 2007' in datos.isobolograma_2d:
+                    req50_arr = FarmacoMatematica.greco_iso_cs(ce_dinamico, 2.37, 38.02, 0.52, 1.12, 0.60, True)
+                    req95_arr = FarmacoMatematica.greco_iso_cs(ce_dinamico, 2.37, 38.02, 0.52, 1.12, 0.40, True)
+                elif 'Manyam 2006' in datos.isobolograma_2d:
+                    v = p_man[datos.isobolograma_2d]
+                    req50_arr = FarmacoMatematica.manyam_iso_cs(ce_dinamico, v[0], v[1], v[2], v[3], 0.50)
+                    req95_arr = FarmacoMatematica.manyam_iso_cs(ce_dinamico, v[0], v[1], v[2], v[3], 0.95)
+                elif 'Heyse 2014' in datos.isobolograma_2d:
+                    if 'BIS' in datos.isobolograma_2d: e0, gamma, c50_r, c50_s = 89.5, 1.88, 27.3, (2.29 if 'post' in datos.isobolograma_2d else 1.99)
+                    elif 'SE ' in datos.isobolograma_2d: e0, gamma, c50_r, c50_s = 97.1, 1.87, 16.2, (2.13 if 'post' in datos.isobolograma_2d else 1.82)
+                    else: e0, gamma, c50_r, c50_s = 103.0, 2.08, 18.2, (2.24 if 'post' in datos.isobolograma_2d else 1.88)
+                    req50_arr = FarmacoMatematica.heyse_2014_iso_csevo(ce_dinamico, 60.0, e0, c50_s, c50_r, gamma)
+                    req95_arr = FarmacoMatematica.heyse_2014_iso_csevo(ce_dinamico, 40.0, e0, c50_s, c50_r, gamma)
+            
+            elif datos.farmaco == 'Ketamina':
+                if 'Jonkman 2018' in datos.isobolograma_2d:
+                    req50_arr = FarmacoMatematica.jonkman_2018_iso_cx(ce_dinamico, 0.50, 'remi')
+                    req95_arr = FarmacoMatematica.jonkman_2018_iso_cx(ce_dinamico, 0.80, 'remi')
+                elif 'Hui 1995' in datos.isobolograma_2d:
+                    ef_str = 'Tolerancia al Estímulo Eléctrico' if 'Eléctrico' in datos.isobolograma_2d else 'LOC'
+                    req50_arr = FarmacoMatematica.hui_1995_iso_cx(ce_dinamico, 0.50, ef_str, 'prop')
+                    req95_arr = FarmacoMatematica.hui_1995_iso_cx(ce_dinamico, 0.95, ef_str, 'prop')
+                elif 'Hamp 2018' in datos.isobolograma_2d:
+                    req50_arr = FarmacoMatematica.hamp_2018_iso_csevo(ce_dinamico, 0.50)
+                    req95_arr = np.full_like(ce_dinamico, np.nan)
 
-        elif datos.farmaco == 'Ketamina':
-            # SOLUCIÓN JONKMAN 2: El fármaco principal es Ketamina (Eje Y). Despejamos Remifentanilo (solve_for='remi')
-            isobolas['Remifentanilo Probabilidad de Conservar la Ventilación Minuto (Jonkman 2018)'] = {'ce_50': clean_arr(FarmacoMatematica.jonkman_2018_iso_cx(ce_y, 0.50, solve_for='remi')), 'ce_80': clean_arr(FarmacoMatematica.jonkman_2018_iso_cx(ce_y, 0.80, solve_for='remi'))}
-            isobolas['Propofol LOC (Hui 1995)'] = {'ce_50': clean_arr(FarmacoMatematica.hui_1995_iso_cx(ce_y, 0.50, efecto='LOC', solve_for='prop')), 'ce_95': clean_arr(FarmacoMatematica.hui_1995_iso_cx(ce_y, 0.95, efecto='LOC', solve_for='prop'))}
-            isobolas['Propofol Tolerancia al Estímulo Eléctrico (Hui 1995)'] = {'ce_50': clean_arr(FarmacoMatematica.hui_1995_iso_cx(ce_y, 0.50, efecto='Tolerancia al Estímulo Eléctrico', solve_for='prop')), 'ce_95': clean_arr(FarmacoMatematica.hui_1995_iso_cx(ce_y, 0.95, efecto='Tolerancia al Estímulo Eléctrico', solve_for='prop'))}
-            isobolas['Sevoflurano No Movimiento (Hamp 2018)'] = {'ce_50': clean_arr(FarmacoMatematica.hamp_2018_iso_csevo(ce_y, 0.50)), 'ce_95': clean_arr(np.full_like(ce_y, np.nan))}
+            # Generamos las curvas para la app móvil
+            curvas = []
+            nombre_droga = datos.isobolograma_2d.split(' ')[0]
+            unit = req_dict['unit']
+
+            if 'Requerimiento' in datos.tipo_grafico_iso:
+                curvas.append({"nombre": f"Req. 50% ({unit})", "color": "#ba68c8", "es_linea_punteada": True, "es_eje_secundario": False, "es_area": False, "datos": clean_arr(req50_arr)})
+                curvas.append({"nombre": f"Req. 95% ({unit})", "color": "#7b1fa2", "es_linea_punteada": False, "es_eje_secundario": False, "es_area": False, "datos": clean_arr(req95_arr)})
+                
+                # Eje secundario EEG Predictivo (Solo para Remifentanilo)
+                if datos.farmaco == 'Remifentanilo' and any(kw in datos.tipo_grafico_iso for kw in ['BIS', 'PSI', 'SE ', 'RE ']):
+                    is_prop = 'Propofol' in datos.isobolograma_2d
+                    f_str = 'Propofol' if is_prop else 'Sevoflurano'
+                    
+                    if 'PSI' in datos.tipo_grafico_iso:
+                        bis50_arr = FarmacoMatematica.kuizenga_2019_prob(req50_arr, f_str, 'PSI', ce_dinamico)
+                        bis95_arr = FarmacoMatematica.kuizenga_2019_prob(req95_arr, f_str, 'PSI', ce_dinamico)
+                        lbl_eeg = "PSI"
+                    elif is_prop and 'BIS' in datos.tipo_grafico_iso:
+                        bis50_arr = FarmacoMatematica.bouillon_2004_bis(req50_arr, ce_dinamico)
+                        bis95_arr = FarmacoMatematica.bouillon_2004_bis(req95_arr, ce_dinamico)
+                        lbl_eeg = "BIS"
+                    elif not is_prop:
+                        if 'Requerimiento Dinámico BIS' == datos.tipo_grafico_iso:
+                            bis50_arr = FarmacoMatematica.estimar_bis_global(req50_arr, ce_dinamico)
+                            bis95_arr = FarmacoMatematica.estimar_bis_global(req95_arr, ce_dinamico)
+                            lbl_eeg = "BIS"
+                        else:
+                            e0, gamma, c50_r = 89.5, 1.88, 27.3; lbl_eeg = "BIS"
+                            if 'SE ' in datos.tipo_grafico_iso: e0, gamma, c50_r, lbl_eeg = 97.1, 1.87, 16.2, "SE"
+                            elif 'RE ' in datos.tipo_grafico_iso: e0, gamma, c50_r, lbl_eeg = 103.0, 2.08, 18.2, "RE"
+                            
+                            is_post = 'post' in datos.tipo_grafico_iso
+                            if 'BIS' in datos.tipo_grafico_iso: c50_s = 2.29 if is_post else 1.99
+                            elif 'SE ' in datos.tipo_grafico_iso: c50_s = 2.13 if is_post else 1.82
+                            elif 'RE ' in datos.tipo_grafico_iso: c50_s = 2.24 if is_post else 1.88
+                            else: c50_s = 1.99
+                            
+                            bis50_arr = FarmacoMatematica.heyse_2014_prob(req50_arr, ce_dinamico, e0, c50_s, c50_r, gamma)
+                            bis95_arr = FarmacoMatematica.heyse_2014_prob(req95_arr, ce_dinamico, e0, c50_s, c50_r, gamma)
+
+                    curvas.append({"nombre": f"{lbl_eeg} si Req. 50%", "color": "#4dd0e1", "es_linea_punteada": True, "es_eje_secundario": True, "es_area": False, "datos": clean_arr(bis50_arr)})
+                    curvas.append({"nombre": f"{lbl_eeg} si Req. 95%", "color": "#00acc1", "es_linea_punteada": False, "es_eje_secundario": True, "es_area": False, "datos": clean_arr(bis95_arr)})
+
+            elif 'Ahorro' in datos.tipo_grafico_iso:
+                ahorro_50 = (1.0 - req50_arr / req_dict['base_50']) * 100.0 if req_dict['base_50'] > 0 else np.zeros_like(ce_dinamico)
+                ahorro_95 = (1.0 - req95_arr / req_dict['base_95']) * 100.0 if req_dict['base_95'] > 0 else np.zeros_like(ce_dinamico)
+                curvas.append({"nombre": f"Ahorro 50% (%)", "color": "#ba68c8", "es_linea_punteada": True, "es_eje_secundario": False, "es_area": False, "datos": clean_arr(ahorro_50)})
+                curvas.append({"nombre": f"Ahorro 95% (%)", "color": "#7b1fa2", "es_linea_punteada": False, "es_eje_secundario": False, "es_area": False, "datos": clean_arr(ahorro_95)})
+
+            elif 'Contribución' in datos.tipo_grafico_iso:
+                is_95 = '95%' in datos.tipo_grafico_iso
+                req_arr = req95_arr if is_95 else req50_arr
+                base_val = req_dict['base_95'] if is_95 else req_dict['base_50']
+                if base_val > 0:
+                    ahorro_arr = np.clip((1.0 - req_arr / base_val) * 100.0, 0, 100)
+                else:
+                    ahorro_arr = np.zeros_like(ce_dinamico)
+                curvas.append({"nombre": f"Aporte {datos.farmaco} (%)", "color": "#4caf50", "es_linea_punteada": False, "es_eje_secundario": False, "es_area": True, "datos": clean_arr(ahorro_arr)})
+                curvas.append({"nombre": f"Aporte {nombre_droga} (%)", "color": "#ff9800", "es_linea_punteada": False, "es_eje_secundario": False, "es_area": True, "datos": clean_arr(np.full_like(ce_dinamico, 100.0))})
+
+            grafico_dinamico_iso = {
+                "activo": True,
+                "titulo_grafico": f"{datos.tipo_grafico_iso} - {datos.isobolograma_2d}",
+                "etiqueta_y": f"{nombre_droga} ({unit})" if 'Requerimiento' in datos.tipo_grafico_iso else "Porcentaje (%)",
+                "etiqueta_y2": "EEG Proyectado" if 'Requerimiento' in datos.tipo_grafico_iso and 'eje_secundario' in str(curvas) else None,
+                "limite_y": 105.0 if 'Requerimiento' not in datos.tipo_grafico_iso else None,
+                "curvas": curvas
+            }
 
         # SUPERFICIE 3D UNIFICADA
-        if datos.modelo_3d != 'Ninguna' and datos.modelo_3d in isobolas:
+        if datos.modelo_3d != 'Ninguna' and datos.modelo_3d in isobolas_tmp:
             is_prop = 'Propofol' in datos.modelo_3d
             if datos.farmaco == 'Fentanilo':
                 y_max, x_max = 10.0, 30.0 if is_prop else 8.0
@@ -696,7 +989,6 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                 xlab = 'Ce Propofol (ug/ml)' if is_prop else 'etSEV (%)'
                 zlab = datos.modelo_3d
             elif datos.farmaco == 'Remifentanilo':
-                # SOLUCIÓN JONKMAN 3D 1: Escalas correctas
                 if 'Jonkman' in datos.modelo_3d:
                     y_max, x_max = max(base_max, 10.0), 1000.0
                     ylab, xlab, zlab = 'Ce Remifentanilo (ng/ml)', 'Ce Ketamina (ng/ml)', datos.modelo_3d
@@ -707,7 +999,6 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                     zlab = datos.modelo_3d
             else: # Ketamina
                 if 'Jonkman' in datos.modelo_3d:
-                    # SOLUCIÓN JONKMAN 3D 2: Escalas correctas
                     y_max, x_max = max(base_max, 1000.0), 10.0
                     ylab, xlab, zlab = 'Ce Ketamina (ng/ml)', 'Ce Remifentanilo (ng/ml)', datos.modelo_3d
                 elif 'Hui' in datos.modelo_3d:
@@ -744,6 +1035,9 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                 if 'Bouillon 2004' in datos.modelo_3d:
                     if 'BIS' in datos.modelo_3d: Z = FarmacoMatematica.bouillon_2004_bis(X, Y)
                     else: Z = FarmacoMatematica.bouillon_2004_prob(X, Y, 'LOC' if 'LOC' in datos.modelo_3d else 'Laringoscopia', True)
+                elif 'Kuizenga 2019' in datos.modelo_3d:
+                    f_str = 'Propofol' if 'Propofol' in datos.modelo_3d else 'Sevoflurano'
+                    Z = FarmacoMatematica.kuizenga_2019_prob(X, f_str, 'PSI', Y)
                 elif 'Jonkman' in datos.modelo_3d:
                     Z = FarmacoMatematica.jonkman_2018_prob(Y, X) # Y=Remi, X=Ketamina
                 elif 'Heyse 2014' in datos.modelo_3d:
@@ -776,9 +1070,9 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             Z = np.nan_to_num(Z, nan=0.0, posinf=100.0, neginf=0.0)
             superficie_3d = {
                 "x_mesh": x_m.tolist(), "y_mesh": y_m.tolist(), "z_mesh": np.round(Z, 2).tolist(),
-                "iso50_x": clean_arr(isobolas[datos.modelo_3d]['ce_50']), "iso50_y": clean_arr(isobolas['ce_farmaco']),
-                "iso80_x": clean_arr(isobolas[datos.modelo_3d].get('ce_80', [])),
-                "iso95_x": clean_arr(isobolas[datos.modelo_3d].get('ce_95', [])), "iso95_y": clean_arr(isobolas['ce_farmaco']),
+                "iso50_x": clean_arr(isobolas_clasicas[datos.modelo_3d]['ce_50']), "iso50_y": clean_arr(isobolas_clasicas['ce_farmaco']),
+                "iso80_x": clean_arr(isobolas_clasicas[datos.modelo_3d].get('ce_80', [])),
+                "iso95_x": clean_arr(isobolas_clasicas[datos.modelo_3d].get('ce_95', [])), "iso95_y": clean_arr(isobolas_clasicas['ce_farmaco']),
                 "xlabel": xlab, "ylabel": ylab, "zlabel": zlab, "title": datos.modelo_3d
             }
 
@@ -787,6 +1081,7 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
         "cp": np.round(Cp, 3).tolist(), "ce": np.round(Ce, 3).tolist(),
         "alertas_clinicas": {"torax_lenoso": torax_lenoso.tolist(), "depresion_respiratoria": depresion_resp.tolist(), "apnea": apnea.tolist()},
         "farmacodinamia_pd": {k: np.round(v, 2).tolist() for k, v in pd_arrays.items()},
-        "isobolas_interaccion": isobolas,
+        "isobolas_interaccion": isobolas_clasicas,
+        "grafico_dinamico_iso": grafico_dinamico_iso,
         "superficie_3d": superficie_3d
     }
