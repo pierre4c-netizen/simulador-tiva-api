@@ -1,46 +1,9 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from typing import List, Dict, Any, Tuple, Union
 import numpy as np
-from scipy.integrate import odeint
 from scipy.optimize import root_scalar
 
 # ==========================================
-# 1. ESTRUCTURAS DE ENTRADA
-# ==========================================
-class EventoTIVA(BaseModel):
-    tipo: str
-    ini_min: float
-    fin_min: float
-    tasa_ug_min: float
-
-class PeticionSimulacion(BaseModel):
-    farmaco: str = "Fentanilo"
-    peso_kg: float
-    altura_cm: float
-    edad_anos: float
-    sexo: str
-    modelo_pk: str
-    ke0_tpeak: str
-    eventos: List[EventoTIVA]
-    minutos_simulacion: int = 1440
-    modelo_3d: str = "Ninguna"
-    isobolograma_2d: str = "Ninguno"
-    tipo_grafico_iso: str = "Clásico"
-
-app = FastAPI(title="TIVA Flow API Motor Matemático")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ==========================================
-# 2. CLASE MATEMÁTICA PURA (PD e Isobolas)
+# CLASE MATEMÁTICA PURA (PD e Isobolas)
 # ==========================================
 class FarmacoMatematica:
     @staticmethod
