@@ -232,54 +232,100 @@ class FarmacoMatematica:
         frac = np.where(den == 0, 0.0, num / den)
         return 5.0 * (1.0 - frac)
 
+    # =========================================================================
+    # JONKMAN 2018 SEPARADO EN DOS MATEMÁTICAS INDEPENDIENTES SEGÚN SENTIDO
+    # =========================================================================
+
+    # SENTIDO 1: Fármaco Principal REMIFENTANILO (Eje Y = Remifentanilo, Eje X = Ketamina)
     @staticmethod
-    def jonkman_2018_prob(ce_remi: Union[float, np.ndarray], ce_ket: Union[float, np.ndarray], as_percent: bool = True) -> Union[float, np.ndarray]:
-        ce_remi_safe = np.clip(ce_remi, 0.0, None) if isinstance(ce_remi, np.ndarray) else max(0.0, ce_remi)
-        ce_ket_safe = np.clip(ce_ket, 0.0, None) if isinstance(ce_ket, np.ndarray) else max(0.0, ce_ket)
+    def jonkman_remi_principal_prob(ce_ket_x: Union[float, np.ndarray], ce_remi_y: Union[float, np.ndarray], as_percent: bool = True) -> Union[float, np.ndarray]:
+        ce_remi_safe = np.clip(ce_remi_y, 0.0, None) if isinstance(ce_remi_y, np.ndarray) else max(0.0, ce_remi_y)
+        ce_ket_safe = np.clip(ce_ket_x, 0.0, None) if isinstance(ce_ket_x, np.ndarray) else max(0.0, ce_ket_x)
         
         c50_1, g1 = 1.24, 8.44
         c50_2_basal, g2 = 0.46, 4.37
-        cd2k, q = 254.0, 1.0  
+        cd2k = 254.0
         
         y1 = 1.0 / (1.0 + (ce_remi_safe / c50_1)**g1)
-        c50_2_dyn = c50_2_basal * (1.0 + (ce_ket_safe / cd2k)**q)
+        c50_2_dyn = c50_2_basal * (1.0 + (ce_ket_safe / cd2k))
         y2 = 1.0 / (1.0 + (ce_remi_safe / c50_2_dyn)**g2)
         
         p = 0.61 * y1 + 0.39 * y2
         return p * 100.0 if as_percent else p
 
     @staticmethod
-    def jonkman_2018_iso_cx(ce_known: Union[float, np.ndarray], target_prob: float, solve_for: str) -> Union[float, np.ndarray]:
-        if target_prob <= 0 or target_prob >= 1: return np.full_like(ce_known, np.nan) if isinstance(ce_known, np.ndarray) else np.nan
+    def jonkman_remi_principal_iso_ket(ce_remi_y: Union[float, np.ndarray], target_prob: float) -> Union[float, np.ndarray]:
+        """Despeje analítico cerrado exacto de Ketamina (X) en función de Remifentanilo (Y)."""
+        if target_prob <= 0 or target_prob >= 1:
+            return np.full_like(ce_remi_y, np.nan, dtype=float) if isinstance(ce_remi_y, np.ndarray) else np.nan
         
-        def objective(cx, c_known, tgt, s_for):
-            if s_for == 'ket':
-                return float(FarmacoMatematica.jonkman_2018_prob(c_known, cx, False) - tgt)
-            else:
-                return float(FarmacoMatematica.jonkman_2018_prob(cx, c_known, False) - tgt)
-                
-        if isinstance(ce_known, np.ndarray):
-            res = []
-            for val in ce_known:
-                try:
-                    if solve_for == 'ket':
-                        if objective(0.0, val, target_prob, 'ket') > 0: res.append(np.nan)
-                        elif objective(50000.0, val, target_prob, 'ket') < 0: res.append(np.nan) 
-                        else: res.append(root_scalar(lambda cx: objective(cx, val, target_prob, 'ket'), bracket=[0.0, 50000.0]).root)
-                    else: 
-                        if objective(0.0, val, target_prob, 'remi') < 0: res.append(np.nan)
-                        else: res.append(root_scalar(lambda cx: objective(cx, val, target_prob, 'remi'), bracket=[0.0, 50.0]).root)
-                except: res.append(np.nan)
-            return np.array(res)
-        else:
+        c50_1, g1 = 1.24, 8.44
+        c50_2_basal, g2 = 0.46, 4.37
+        cd2k = 254.0
+        max_ket_clinico = 2500.0
+
+        def _calc_ket_req(val_remi: float) -> float:
+            if val_remi <= 0.0:
+                return np.nan
+            y1 = 1.0 / (1.0 + (val_remi / c50_1)**g1)
+            y2_req = (target_prob - 0.61 * y1) / 0.39
+            if y2_req <= 0.0 or y2_req >= 1.0:
+                return np.nan
+            term = ((1.0 - y2_req) / y2_req) ** (1.0 / g2)
+            if term <= 0.0:
+                return np.nan
+            c50_2_req = val_remi / term
+            c_ket = cd2k * ((c50_2_req / c50_2_basal) - 1.0)
+            if c_ket < 0.0 or c_ket > max_ket_clinico:
+                return np.nan
+            return float(c_ket)
+
+        if isinstance(ce_remi_y, np.ndarray):
+            return np.array([_calc_ket_req(float(v)) for v in ce_remi_y], dtype=float)
+        return _calc_ket_req(float(ce_remi_y))
+
+    # SENTIDO 2: Fármaco Principal KETAMINA (Eje Y = Ketamina, Eje X = Remifentanilo)
+    @staticmethod
+    def jonkman_keta_principal_prob(ce_remi_x: Union[float, np.ndarray], ce_ket_y: Union[float, np.ndarray], as_percent: bool = True) -> Union[float, np.ndarray]:
+        return FarmacoMatematica.jonkman_remi_principal_prob(ce_ket_y, ce_remi_x, as_percent=as_percent)
+
+    @staticmethod
+    def jonkman_keta_principal_iso_remi(ce_ket_y: Union[float, np.ndarray], target_prob: float) -> Union[float, np.ndarray]:
+        """Resolución numérica dedicada de Remifentanilo (X) en función de Ketamina (Y)."""
+        if target_prob <= 0 or target_prob >= 1:
+            return np.full_like(ce_ket_y, np.nan, dtype=float) if isinstance(ce_ket_y, np.ndarray) else np.nan
+
+        def _calc_remi_req(val_ket: float) -> float:
+            val_k_safe = max(0.0, float(val_ket))
             try:
-                if solve_for == 'ket':
-                    if objective(0.0, ce_known, target_prob, 'ket') > 0 or objective(50000.0, ce_known, target_prob, 'ket') < 0: return np.nan
-                    return root_scalar(lambda cx: objective(cx, ce_known, target_prob, 'ket'), bracket=[0.0, 50000.0]).root
-                else: 
-                    if objective(0.0, ce_known, target_prob, 'remi') < 0: return np.nan
-                    return root_scalar(lambda cx: objective(cx, ce_known, target_prob, 'remi'), bracket=[0.0, 50.0]).root
-            except: return np.nan
+                f_low = float(FarmacoMatematica.jonkman_keta_principal_prob(0.0, val_k_safe, False) - target_prob)
+                f_high = float(FarmacoMatematica.jonkman_keta_principal_prob(50.0, val_k_safe, False) - target_prob)
+                if f_low < 0.0 or f_high > 0.0:
+                    return np.nan
+                return float(root_scalar(
+                    lambda r_x: float(FarmacoMatematica.jonkman_keta_principal_prob(r_x, val_k_safe, False) - target_prob),
+                    bracket=[0.0, 50.0],
+                    method='brentq'
+                ).root)
+            except:
+                return np.nan
+
+        if isinstance(ce_ket_y, np.ndarray):
+            return np.array([_calc_remi_req(float(v)) for v in ce_ket_y], dtype=float)
+        return _calc_remi_req(float(ce_ket_y))
+
+    # Wrappers de compatibilidad
+    @staticmethod
+    def jonkman_2018_prob(ce_remi: Union[float, np.ndarray], ce_ket: Union[float, np.ndarray], as_percent: bool = True) -> Union[float, np.ndarray]:
+        return FarmacoMatematica.jonkman_remi_principal_prob(ce_ket, ce_remi, as_percent=as_percent)
+
+    @staticmethod
+    def jonkman_2018_iso_cx(ce_known: Union[float, np.ndarray], target_prob: float, solve_for: str) -> Union[float, np.ndarray]:
+        if solve_for == 'ket':
+            return FarmacoMatematica.jonkman_remi_principal_iso_ket(ce_known, target_prob)
+        return FarmacoMatematica.jonkman_keta_principal_iso_remi(ce_known, target_prob)
+
+    # =========================================================================
 
     @staticmethod
     def hui_1995_prob(c_prop: Union[float, np.ndarray], c_ket: Union[float, np.ndarray], efecto: str = 'LOC', as_percent: bool = True) -> Union[float, np.ndarray]:
