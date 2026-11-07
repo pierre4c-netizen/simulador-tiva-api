@@ -119,11 +119,22 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
 
     if 'Pediátrico' not in datos.modelo_pk or datos.farmaco == 'Ketamina' or 'Propósito General' in datos.modelo_pk:
         base_max = max(np.max(Cp), np.max(Ce)) * 1.1 if max(np.max(Cp), np.max(Ce)) > 0 else 10.0
-        if datos.farmaco == 'Ketamina': max_y = max(base_max, 1000.0)
-        else: max_y = max(base_max, 15.0)
+        if datos.farmaco == 'Ketamina':
+            max_y = max(base_max, 1000.0)
+            ce_y_clasico = np.linspace(0, max_y, 120)
+        elif datos.farmaco == 'Remifentanilo':
+            max_y = max(base_max, 15.0)
+            # Malla densa entre 0 y 3.0 ng/ml para máxima fidelidad en curvas sensibles como Jonkman
+            corte_bajo = min(3.0, max_y)
+            ce_y_clasico = np.unique(np.round(np.concatenate([
+                np.linspace(0.0, corte_bajo, 100),
+                np.linspace(corte_bajo, max_y, 60)
+            ]), 4))
+        else:
+            max_y = max(base_max, 15.0)
+            ce_y_clasico = np.linspace(0, max_y, 100)
         
-        # 1. MODO CLÁSICO (100 puntos en Y fijos para todos los modelos del fármaco)
-        ce_y_clasico = np.linspace(0, max_y, 100)
+        # 1. MODO CLÁSICO
         isobolas_clasicas['ce_farmaco'] = ce_y_clasico.tolist()
         
         isobolas_tmp = {}
@@ -158,7 +169,14 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                 isobolas_tmp['Sevoflurano Tolerancia LMA ΔANI < 20% (Wang 2026)'] = {'ce_50': FarmacoMatematica.wang_2026_iso_cm(c_y, 4.29, 0.50), 'ce_95': FarmacoMatematica.wang_2026_iso_cm(c_y, 4.29, 0.95), 'base_50': 4.29, 'base_95': 4.29, 'unit': '%'}
             
             elif datos.farmaco == 'Remifentanilo':
-                isobolas_tmp['Ketamina Probabilidad de Conservar la Ventilación Minuto (Jonkman 2018)'] = {'ce_50': FarmacoMatematica.jonkman_2018_iso_cx(c_y, 0.50, solve_for='ket'), 'ce_95': FarmacoMatematica.jonkman_2018_iso_cx(c_y, 0.80, solve_for='ket'), 'base_50': FarmacoMatematica.jonkman_2018_iso_cx(0.0, 0.50, 'ket'), 'base_95': FarmacoMatematica.jonkman_2018_iso_cx(0.0, 0.80, 'ket'), 'unit': 'ng/ml'}
+                # JONKMAN SENTIDO 1: Fármaco Principal Remifentanilo -> Despeja Ketamina
+                isobolas_tmp['Ketamina Probabilidad de Conservar la Ventilación Minuto (Jonkman 2018)'] = {
+                    'ce_50': FarmacoMatematica.jonkman_remi_principal_iso_ket(c_y, 0.50),
+                    'ce_95': FarmacoMatematica.jonkman_remi_principal_iso_ket(c_y, 0.80),
+                    'base_50': np.nan,
+                    'base_95': np.nan,
+                    'unit': 'ng/ml'
+                }
                 isobolas_tmp['Propofol BIS (Bouillon 2004)'] = {'ce_50': FarmacoMatematica.bouillon_2004_bis_iso_cprop(c_y, 60.0), 'ce_95': FarmacoMatematica.bouillon_2004_bis_iso_cprop(c_y, 40.0), 'base_50': FarmacoMatematica.bouillon_2004_bis_iso_cprop(0.0, 60.0), 'base_95': FarmacoMatematica.bouillon_2004_bis_iso_cprop(0.0, 40.0), 'unit': 'ug/ml'}
                 isobolas_tmp['Propofol LOC (Bouillon 2004)'] = {'ce_50': FarmacoMatematica.bouillon_2004_iso_cprop(c_y, 0.50, 'LOC'), 'ce_95': FarmacoMatematica.bouillon_2004_iso_cprop(c_y, 0.95, 'LOC'), 'base_50': FarmacoMatematica.bouillon_2004_iso_cprop(0.0, 0.50, 'LOC'), 'base_95': FarmacoMatematica.bouillon_2004_iso_cprop(0.0, 0.95, 'LOC'), 'unit': 'ug/ml'}
                 isobolas_tmp['Propofol Tolerancia Laringoscopia (Bouillon 2004)'] = {'ce_50': FarmacoMatematica.bouillon_2004_iso_cprop(c_y, 0.50, 'Laringoscopia'), 'ce_95': FarmacoMatematica.bouillon_2004_iso_cprop(c_y, 0.95, 'Laringoscopia'), 'base_50': FarmacoMatematica.bouillon_2004_iso_cprop(0.0, 0.50, 'Laringoscopia'), 'base_95': FarmacoMatematica.bouillon_2004_iso_cprop(0.0, 0.95, 'Laringoscopia'), 'unit': 'ug/ml'}
@@ -200,11 +218,17 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                 isobolas_tmp['Sevoflurano RE pre-Laringoscopia (Heyse 2014)'] = {'ce_50': FarmacoMatematica.heyse_2014_iso_csevo(c_y, 60.0, e0_re, c50_s_reo, c50_r_re, gam_re), 'ce_95': FarmacoMatematica.heyse_2014_iso_csevo(c_y, 40.0, e0_re, c50_s_reo, c50_r_re, gam_re), 'base_50': FarmacoMatematica.heyse_2014_iso_csevo(0.0, 60.0, e0_re, c50_s_reo, c50_r_re, gam_re), 'base_95': FarmacoMatematica.heyse_2014_iso_csevo(0.0, 40.0, e0_re, c50_s_reo, c50_r_re, gam_re), 'unit': '%'}
 
             elif datos.farmaco == 'Ketamina':
-                isobolas_tmp['Remifentanilo Probabilidad de Conservar la Ventilación Minuto (Jonkman 2018)'] = {'ce_50': FarmacoMatematica.jonkman_2018_iso_cx(c_y, 0.50, solve_for='remi'), 'ce_95': FarmacoMatematica.jonkman_2018_iso_cx(c_y, 0.80, solve_for='remi'), 'base_50': FarmacoMatematica.jonkman_2018_iso_cx(0.0, 0.50, 'remi'), 'base_95': FarmacoMatematica.jonkman_2018_iso_cx(0.0, 0.80, 'remi'), 'unit': 'ng/ml'}
+                # JONKMAN SENTIDO 2: Fármaco Principal Ketamina -> Despeja Remifentanilo
+                isobolas_tmp['Remifentanilo Probabilidad de Conservar la Ventilación Minuto (Jonkman 2018)'] = {
+                    'ce_50': FarmacoMatematica.jonkman_keta_principal_iso_remi(c_y, 0.50),
+                    'ce_95': FarmacoMatematica.jonkman_keta_principal_iso_remi(c_y, 0.80),
+                    'base_50': FarmacoMatematica.jonkman_keta_principal_iso_remi(0.0, 0.50),
+                    'base_95': FarmacoMatematica.jonkman_keta_principal_iso_remi(0.0, 0.80),
+                    'unit': 'ng/ml'
+                }
                 isobolas_tmp['Propofol LOC (Hui 1995)'] = {'ce_50': FarmacoMatematica.hui_1995_iso_cx(c_y, 0.50, efecto='LOC', solve_for='prop'), 'ce_95': FarmacoMatematica.hui_1995_iso_cx(c_y, 0.95, efecto='LOC', solve_for='prop'), 'base_50': FarmacoMatematica.hui_1995_iso_cx(0.0, 0.50, efecto='LOC', solve_for='prop'), 'base_95': FarmacoMatematica.hui_1995_iso_cx(0.0, 0.95, efecto='LOC', solve_for='prop'), 'unit': 'ug/ml'}
                 isobolas_tmp['Propofol Tolerancia al Estímulo Eléctrico (Hui 1995)'] = {'ce_50': FarmacoMatematica.hui_1995_iso_cx(c_y, 0.50, efecto='Tolerancia al Estímulo Eléctrico', solve_for='prop'), 'ce_95': FarmacoMatematica.hui_1995_iso_cx(c_y, 0.95, efecto='Tolerancia al Estímulo Eléctrico', solve_for='prop'), 'base_50': FarmacoMatematica.hui_1995_iso_cx(0.0, 0.50, efecto='Tolerancia al Estímulo Eléctrico', solve_for='prop'), 'base_95': FarmacoMatematica.hui_1995_iso_cx(0.0, 0.95, efecto='Tolerancia al Estímulo Eléctrico', solve_for='prop'), 'unit': 'ug/ml'}
                 isobolas_tmp['Sevoflurano No Movimiento (Hamp 2018)'] = {'ce_50': FarmacoMatematica.hamp_2018_iso_csevo(c_y, 0.50), 'ce_95': np.full_like(c_y, np.nan), 'base_50': 2.2, 'base_95': np.nan, 'unit': '%'}
-                # Nuevos Ketofol (Coulter y Shen)
                 isobolas_tmp['Propofol CHWSS ≤ 2 (Coulter 2014)'] = {'ce_50': FarmacoMatematica.coulter_2014_iso_cx(c_y, 0.50, efecto='CHWSS', solve_for='prop'), 'ce_95': FarmacoMatematica.coulter_2014_iso_cx(c_y, 0.95, efecto='CHWSS', solve_for='prop'), 'base_50': FarmacoMatematica.coulter_2014_iso_cx(0.0, 0.50, efecto='CHWSS', solve_for='prop'), 'base_95': FarmacoMatematica.coulter_2014_iso_cx(0.0, 0.95, efecto='CHWSS', solve_for='prop'), 'unit': 'ug/ml'}
                 isobolas_tmp['Propofol Tolerancia al Estimulo Electrico (Coulter 2014)'] = {'ce_50': FarmacoMatematica.coulter_2014_iso_cx(c_y, 0.50, efecto='Electrico', solve_for='prop'), 'ce_95': FarmacoMatematica.coulter_2014_iso_cx(c_y, 0.95, efecto='Electrico', solve_for='prop'), 'base_50': FarmacoMatematica.coulter_2014_iso_cx(0.0, 0.50, efecto='Electrico', solve_for='prop'), 'base_95': FarmacoMatematica.coulter_2014_iso_cx(0.0, 0.95, efecto='Electrico', solve_for='prop'), 'unit': 'ug/ml'}
                 isobolas_tmp['Propofol Tolerancia a la Nocicepcion Visceral (Shen 2026)'] = {'ce_50': FarmacoMatematica.shen_2026_iso_cx(c_y, 0.50, solve_for='prop'), 'ce_95': FarmacoMatematica.shen_2026_iso_cx(c_y, 0.95, solve_for='prop'), 'base_50': 3.84, 'base_95': 5.20, 'unit': 'ug/ml'}
@@ -242,8 +266,8 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             
             elif datos.farmaco == 'Remifentanilo':
                 if 'Jonkman' in datos.isobolograma_2d:
-                    req50_arr = FarmacoMatematica.jonkman_2018_iso_cx(ce_dinamico, 0.50, 'ket')
-                    req95_arr = FarmacoMatematica.jonkman_2018_iso_cx(ce_dinamico, 0.80, 'ket')
+                    req50_arr = FarmacoMatematica.jonkman_remi_principal_iso_ket(ce_dinamico, 0.50)
+                    req95_arr = FarmacoMatematica.jonkman_remi_principal_iso_ket(ce_dinamico, 0.80)
                 elif 'Bouillon 2004' in datos.isobolograma_2d:
                     if 'BIS' in datos.isobolograma_2d:
                         req50_arr = FarmacoMatematica.bouillon_2004_bis_iso_cprop(ce_dinamico, 60.0)
@@ -276,8 +300,8 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             
             elif datos.farmaco == 'Ketamina':
                 if 'Jonkman 2018' in datos.isobolograma_2d:
-                    req50_arr = FarmacoMatematica.jonkman_2018_iso_cx(ce_dinamico, 0.50, 'remi')
-                    req95_arr = FarmacoMatematica.jonkman_2018_iso_cx(ce_dinamico, 0.80, 'remi')
+                    req50_arr = FarmacoMatematica.jonkman_keta_principal_iso_remi(ce_dinamico, 0.50)
+                    req95_arr = FarmacoMatematica.jonkman_keta_principal_iso_remi(ce_dinamico, 0.80)
                 elif 'Hui 1995' in datos.isobolograma_2d:
                     ef_str = 'Tolerancia al Estímulo Eléctrico' if 'Eléctrico' in datos.isobolograma_2d else 'LOC'
                     req50_arr = FarmacoMatematica.hui_1995_iso_cx(ce_dinamico, 0.50, ef_str, 'prop')
@@ -420,7 +444,8 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                     f_str = 'Propofol' if 'Propofol' in datos.modelo_3d else 'Sevoflurano'
                     Z = FarmacoMatematica.kuizenga_2019_prob(X, f_str, 'PSI', Y)
                 elif 'Jonkman' in datos.modelo_3d:
-                    Z = FarmacoMatematica.jonkman_2018_prob(Y, X)
+                    # SENTIDO 1: X = Ketamina, Y = Remifentanilo
+                    Z = FarmacoMatematica.jonkman_remi_principal_prob(X, Y, True)
                 elif 'Heyse 2014' in datos.modelo_3d:
                     if 'BIS' in datos.modelo_3d:
                         e0, gamma, c50_remi = 89.5, 1.88, 27.3
@@ -442,7 +467,8 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                     Z = FarmacoMatematica.manyam_prob(X, Y, v[0], v[1], v[2], v[3], True)
             elif datos.farmaco == 'Ketamina':
                 if 'Jonkman' in datos.modelo_3d:
-                    Z = FarmacoMatematica.jonkman_2018_prob(X, Y)
+                    # SENTIDO 2: X = Remifentanilo, Y = Ketamina
+                    Z = FarmacoMatematica.jonkman_keta_principal_prob(X, Y, True)
                 elif 'Hui' in datos.modelo_3d:
                     Z = FarmacoMatematica.hui_1995_prob(X, Y, efecto='Tolerancia al Estímulo Eléctrico' if 'Eléctrico' in datos.modelo_3d else 'LOC', as_percent=True)
                 elif 'Shen' in datos.modelo_3d:
