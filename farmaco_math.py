@@ -233,6 +233,42 @@ class FarmacoMatematica:
         return 5.0 * (1.0 - frac)
 
     # =========================================================================
+    # MODELOS PEDIÁTRICOS CRUZAT (2024) Y JELEAZCOV (2008)
+    # =========================================================================
+    @staticmethod
+    def cruzat_2024_nol(c_e: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
+        ce_safe = np.clip(c_e, 0.0, None) if isinstance(c_e, np.ndarray) else max(0.0, c_e)
+        return 19.9 * (1.0 - (ce_safe**1.33) / (ce_safe**1.33 + 1.93**1.33))
+
+    @staticmethod
+    def jeleazcov_2008_bis(c_prop: Union[float, np.ndarray], c_remi: Union[float, np.ndarray], c_fent: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
+        c_p = np.clip(c_prop, 0.0, None) if isinstance(c_prop, np.ndarray) else max(0.0, c_prop)
+        c_r = np.clip(c_remi, 0.0, None) if isinstance(c_remi, np.ndarray) else max(0.0, c_remi)
+        c_f = np.clip(c_fent, 0.0, None) if isinstance(c_fent, np.ndarray) else max(0.0, c_fent)
+        
+        c_eff = (c_p / 5.2) + (c_r / 24.1) + (c_f / 8.6)
+        p = (c_eff**1.41) / (1.0 + c_eff**1.41)
+        return 93.2 - 83.4 * p
+
+    @staticmethod
+    def jeleazcov_2008_iso_cprop(c_opioide: Union[float, np.ndarray], target_bis: float, farmaco_opioide: str) -> Union[float, np.ndarray]:
+        if target_bis <= 9.8 or target_bis >= 93.2:
+            return np.full_like(c_opioide, np.nan) if isinstance(c_opioide, np.ndarray) else np.nan
+            
+        ec50_opio = 24.1 if farmaco_opioide == 'Remifentanilo' else 8.6
+        e_ratio = (93.2 - target_bis) / (target_bis - 9.8)
+        c_eff_req = e_ratio ** (1.0 / 1.41)
+        
+        c_o = np.clip(c_opioide, 0.0, None) if isinstance(c_opioide, np.ndarray) else max(0.0, c_opioide)
+        c_prop = 5.2 * (c_eff_req - (c_o / ec50_opio))
+        
+        if isinstance(c_prop, np.ndarray):
+            c_prop[c_prop < 0] = np.nan
+        else:
+            if c_prop < 0: return np.nan
+        return c_prop
+
+    # =========================================================================
     # JONKMAN 2018 SEPARADO EN DOS MATEMÁTICAS INDEPENDIENTES SEGÚN SENTIDO
     # =========================================================================
 
@@ -602,6 +638,18 @@ def _eleveld(p, a, s, e):
     Cl3 = max(0.001, 0.124*(((max(0.01, 5.03*SIZE*np.exp(-0.0315*(e-35.0))*np.exp(-0.0260*(p-70.0))))/5.03)**0.75)*np.exp(-0.00554*(e-35.0)))
     return V1, V2, V3, Cl1, Cl2, Cl3
 
+def _calcular_ross_minto_jeleazcov(p, a, s, e):
+    peso_kg = max(1.0, p)
+    edad_eff = min(e, 34.0)
+    V1 = max(0.01, (0.362 - 0.0104 * edad_eff) * peso_kg)
+    Cl1 = max(0.001, (0.09 - 0.00269 * edad_eff) * peso_kg)
+    k12, k21, k13, k31 = 0.362, 0.195, 0.013, 0.014
+    V2 = max(0.01, V1 * (k12 / k21))
+    V3 = max(0.01, V1 * (k13 / k31))
+    Cl2 = max(0.001, V1 * k12)
+    Cl3 = max(0.001, V1 * k13)
+    return V1, V2, V3, Cl1, Cl2, Cl3
+
 def _calcular_kamp_general(p, a, s, e):
     V1, V2, V3 = 21.0 * (p/70.0), 46.0 * (p/70.0), 254.0 * (p/70.0)
     Cl1, Cl2, Cl3 = (79.0/60.0) * ((p/70.0)**0.75), (97.0/60.0) * ((p/70.0)**0.75), (60.0/60.0) * ((p/70.0)**0.75)
@@ -624,9 +672,11 @@ PK_DISPATCHER = {
     'Bae 2020 (Alométrico)': lambda p, a, s, e: (10.1*((p/70.0)**1.23), 26.5*((p/70.0)**1.23), 206.0*((p/70.0)**1.23), 0.704*((p/70.0)**0.313), 2.38*((p/70.0)**0.313), 1.49*((p/70.0)**0.313)),
     'Ginsberg 1996 (Pediátrico / Peso Corporal Total y Edad)': lambda p, a, s, e: (max(0.001, 0.43*(p-19.8)+5.8), max(0.001, 6.2*(e-6.4)+34.4), 0.0, max(0.001, 0.01*(p-19.8)+0.35), max(0.001, 0.82), 0.0),
     'Maharaj 2019 (Pediátrico / Alométrico)': lambda p, a, s, e: (10.8*(p/70.0), 417.0*(p/70.0), 0.0, (32.5/60.0)*((p/70.0)**0.75), (104.0/60.0)*((p/70.0)**0.75), 0.0),
+    'Cruzat 2024 (Pediátrico / Alométrico)': lambda p, a, s, e: (5.46*(p/70.0), 55.6*(p/70.0), 231.0*(p/70.0), 0.51*((p/70.0)**0.75), 9.55*((p/70.0)**0.75), 2.10*((p/70.0)**0.75)),
     'Egan 1996 (Fijo)': lambda p, a, s, e: (7.6, 9.4, 4.7, 2.92, 1.95, 0.10),
     'Rigby-Jones 2007 (Pediátrico / Alométrico)': lambda p, a, s, e: (0.963*(p/10.5), 1.480*(p/10.5), 0.0, 0.716*((p/10.5)**0.75), 0.840*((p/10.5)**0.75), 0.0),
     'Staschen 2013 (Pediátrico / Alométrico dependiente de peso)': lambda p, a, s, e: (1.44*((p/14.6)**0.81), 3.02*((p/14.6)**0.74), 0.0, 1.09*((p/14.6)**(1.32*(p**-0.20))), 0.63*((p/14.6)**0.70), 0.0),
+    'Ross-Minto 2008 (Pediátrico / Híbrido)': _calcular_ross_minto_jeleazcov,
     'Minto 1997 (Masa corporal magra y Edad)': _minto,
     'La Colla 2009 (Masa libre de grasa y Edad)': _lacolla,
     'Kim-Obara-Egan 2017 (Alométrico y Edad)': _kim,
@@ -654,7 +704,7 @@ def get_pk_params(farmaco, modelo_pk, ke0_tpeak_str, peso, altura, sexo, edad):
     k13 = Cl3/V1 if V1 > 0 else 0.0
     k31 = Cl3/V3 if V3 > 0 else 0.0
 
-    if 'Pediátrico' in modelo_pk and 'Propósito General' not in modelo_pk and farmaco != 'Ketamina':
+    if 'Ninguno' in ke0_tpeak_str or 'No aplica' in ke0_tpeak_str:
         ke0 = 0.0
     elif farmaco == 'Ketamina':
         if '0.238' in ke0_tpeak_str: ke0 = 0.238
@@ -665,12 +715,18 @@ def get_pk_params(farmaco, modelo_pk, ke0_tpeak_str, peso, altura, sexo, edad):
         elif '0.0568' in ke0_tpeak_str: ke0 = 0.0568
         else: ke0 = 0.0
     elif farmaco == 'Remifentanilo':
-        if 'Abad' in ke0_tpeak_str: ke0 = 0.120
+        if '0.710' in ke0_tpeak_str: ke0 = 0.710
+        elif 'Abad' in ke0_tpeak_str: ke0 = 0.120
         elif 'Egan' in ke0_tpeak_str: ke0 = 0.433
         elif 'Eleveld' in ke0_tpeak_str: ke0 = max(0.01, 1.09 * float(np.exp(-0.0289 * (edad - 35.0))))
+        elif 'Pediátrico' in modelo_pk and 'Propósito General' not in modelo_pk: ke0 = 0.0
         else: ke0 = max(0.01, 0.595 - 0.007 * (edad - 40))
-    else:
-        if '0.108' in ke0_tpeak_str: ke0 = 0.108
+    else:  # Fentanilo
+        if '0.280' in ke0_tpeak_str: ke0 = 0.280
+        elif '0.410' in ke0_tpeak_str: ke0 = 0.410
+        elif '1 min' in ke0_tpeak_str: ke0 = calcular_ke0_para_tpeak(k10, k12, k21, k13, k31, 1.0, default_ke0=0.410)
+        elif 'Pediátrico' in modelo_pk and 'Propósito General' not in modelo_pk: ke0 = 0.0
+        elif '0.108' in ke0_tpeak_str: ke0 = 0.108
         elif '0.105' in ke0_tpeak_str: ke0 = 0.105
         elif '4 min' in ke0_tpeak_str: ke0 = calcular_ke0_para_tpeak(k10, k12, k21, k13, k31, 4.0, default_ke0=0.147)
         else: ke0 = 0.147
