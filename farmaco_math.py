@@ -79,6 +79,8 @@ class FarmacoMatematica:
 
     @staticmethod
     def wang_2026_iso_cm(cf, c50_m, target_prob):
+        def objective(cm: float) -> float:
+            return float(FarmacoMatematica.wang_2026_prob(cm, cf, c50_m, False) - target_prob)
         if isinstance(cf, np.ndarray):
             res = []
             for val in cf:
@@ -88,7 +90,11 @@ class FarmacoMatematica:
                     else: res.append(np.nan)
                 except: res.append(np.nan)
             return np.array(res)
-        return np.nan
+        else:
+            try:
+                if objective(30.0) > 0: return root_scalar(objective, bracket=[0.0, 30.0]).root
+                else: return np.nan
+            except: return np.nan
 
     @staticmethod
     def bouillon_2004_prob(c_prop, c_remi, efecto='Laringoscopia', as_percent=True):
@@ -233,7 +239,8 @@ class FarmacoMatematica:
         return 5.0 * (1.0 - frac)
 
     # =========================================================================
-    # MODELOS PEDIÁTRICOS CRUZAT (2024) Y JELEAZCOV (2008)
+    # MODELOS BIS Y PEDIÁTRICOS: CRUZAT (2024), JELEAZCOV (2008),
+    # WICZLING (2016) Y BIENERT (2020)
     # =========================================================================
     @staticmethod
     def cruzat_2024_nol(c_e: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
@@ -262,6 +269,46 @@ class FarmacoMatematica:
         c_o = np.clip(c_opioide, 0.0, None) if isinstance(c_opioide, np.ndarray) else max(0.0, c_opioide)
         c_prop = 5.2 * (c_eff_req - (c_o / ec50_opio))
         
+        if isinstance(c_prop, np.ndarray):
+            c_prop[c_prop < 0] = np.nan
+        else:
+            if c_prop < 0: return np.nan
+        return c_prop
+
+    @staticmethod
+    def wiczling_2016_bis(c_prop: Union[float, np.ndarray], c_fent: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
+        c_p = np.clip(c_prop, 0.0, None) if isinstance(c_prop, np.ndarray) else max(0.0, c_prop)
+        c_f = np.clip(c_fent, 0.0, None) if isinstance(c_fent, np.ndarray) else max(0.0, c_fent)
+        u = (c_p / 3.12) + (c_f / 4.97)
+        return 92.0 / (1.0 + u)
+
+    @staticmethod
+    def wiczling_2016_iso_cprop(c_fent: Union[float, np.ndarray], target_bis: float) -> Union[float, np.ndarray]:
+        if target_bis <= 0.0 or target_bis >= 92.0:
+            return np.full_like(c_fent, np.nan) if isinstance(c_fent, np.ndarray) else np.nan
+        u_req = (92.0 / target_bis) - 1.0
+        c_f = np.clip(c_fent, 0.0, None) if isinstance(c_fent, np.ndarray) else max(0.0, c_fent)
+        c_prop = 3.12 * (u_req - (c_f / 4.97))
+        if isinstance(c_prop, np.ndarray):
+            c_prop[c_prop < 0] = np.nan
+        else:
+            if c_prop < 0: return np.nan
+        return c_prop
+
+    @staticmethod
+    def bienert_2020_bis(c_prop: Union[float, np.ndarray], c_fent: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
+        c_p = np.clip(c_prop, 0.0, None) if isinstance(c_prop, np.ndarray) else max(0.0, c_prop)
+        c_f = np.clip(c_fent, 0.0, None) if isinstance(c_fent, np.ndarray) else max(0.0, c_fent)
+        u = (c_p / 2.25) + (c_f / 8.77)
+        return 88.6 / (1.0 + u)
+
+    @staticmethod
+    def bienert_2020_iso_cprop(c_fent: Union[float, np.ndarray], target_bis: float) -> Union[float, np.ndarray]:
+        if target_bis <= 0.0 or target_bis >= 88.6:
+            return np.full_like(c_fent, np.nan) if isinstance(c_fent, np.ndarray) else np.nan
+        u_req = (88.6 / target_bis) - 1.0
+        c_f = np.clip(c_fent, 0.0, None) if isinstance(c_fent, np.ndarray) else max(0.0, c_fent)
+        c_prop = 2.25 * (u_req - (c_f / 8.77))
         if isinstance(c_prop, np.ndarray):
             c_prop[c_prop < 0] = np.nan
         else:
@@ -484,6 +531,28 @@ class FarmacoMatematica:
     @staticmethod
     def estimar_bis_global(etsev, ce_remi): 
         return 100.0 / (((etsev/2.37) + (ce_remi/38.02) + 0.52*(etsev/2.37)*(ce_remi/38.02))**1.12 + 1.0)
+
+    @staticmethod
+    def estimar_bis_heyse(etsev, ce_remi):
+        e0, c50_sevo, c50_remi, gamma = 89.5, 1.99, 27.3, 1.88
+        u = (etsev / c50_sevo) + (ce_remi / c50_remi)
+        return e0 - e0 * ((u**gamma) / (1.0 + u**gamma))
+
+    @staticmethod
+    def estimar_heyse_completo(etsev: Union[float, np.ndarray], ce_remi: Union[float, np.ndarray]) -> dict:
+        def calc_efecto(ce_s, ce_r, e0, c50_s, c50_r, gamma):
+            ce_s_safe = np.clip(ce_s, 0.0, None) if isinstance(ce_s, np.ndarray) else max(0.0, ce_s)
+            ce_r_safe = np.clip(ce_r, 0.0, None) if isinstance(ce_r, np.ndarray) else max(0.0, ce_r)
+            u = (ce_s_safe / c50_s) + (ce_r_safe / c50_r)
+            return e0 - e0 * ((u**gamma) / (1.0 + u**gamma))
+        return {
+            'BIS_pre': calc_efecto(etsev, ce_remi, 89.5, 1.99, 27.3, 1.88),
+            'BIS_post': calc_efecto(etsev, ce_remi, 89.5, 2.29, 27.3, 1.88),
+            'SE_pre': calc_efecto(etsev, ce_remi, 97.1, 1.82, 16.2, 1.87),
+            'SE_post': calc_efecto(etsev, ce_remi, 97.1, 2.13, 16.2, 1.87),
+            'RE_pre': calc_efecto(etsev, ce_remi, 103.0, 1.88, 18.2, 2.08),
+            'RE_post': calc_efecto(etsev, ce_remi, 103.0, 2.24, 18.2, 2.08)
+        }
         
     @staticmethod
     def heyse_2014_prob(c_sevo, c_remi, e0, c50_sevo, c50_remi, gamma):
@@ -666,13 +735,18 @@ def _calcular_herd_coulter_2014(p, a, s, e):
     return V1, V2, V3, Cl1, Cl2, Cl3
 
 PK_DISPATCHER = {
+    # Fentanilo
     'Scott 1987 (Fijo)': lambda p, a, s, e: (12.7, 50.7, 274.0, 0.574, 4.01, 1.95),
     'Shafer 1990 (Fijo)': lambda p, a, s, e: (6.09, 28.1, 228.0, 0.504, 2.87, 1.37),
     'Shafer 1990 (Peso Corporal Total)': lambda p, a, s, e: (0.105*p, 0.446*p, 3.37*p, 0.00838*p, 0.0474*p, 0.0199*p),
+    'Wiczling 2016 (Fijo)': lambda p, a, s, e: (43.2, 124.0, 0.0, 1.79, 4.06, 0.0),
+    'Bienert 2020 (Fijo)': lambda p, a, s, e: (25.8, 98.9, 478.0, 0.569, 5.78, 1.48),
     'Bae 2020 (Alométrico)': lambda p, a, s, e: (10.1*((p/70.0)**1.23), 26.5*((p/70.0)**1.23), 206.0*((p/70.0)**1.23), 0.704*((p/70.0)**0.313), 2.38*((p/70.0)**0.313), 1.49*((p/70.0)**0.313)),
     'Ginsberg 1996 (Pediátrico / Peso Corporal Total y Edad)': lambda p, a, s, e: (max(0.001, 0.43*(p-19.8)+5.8), max(0.001, 6.2*(e-6.4)+34.4), 0.0, max(0.001, 0.01*(p-19.8)+0.35), max(0.001, 0.82), 0.0),
     'Maharaj 2019 (Pediátrico / Alométrico)': lambda p, a, s, e: (10.8*(p/70.0), 417.0*(p/70.0), 0.0, (32.5/60.0)*((p/70.0)**0.75), (104.0/60.0)*((p/70.0)**0.75), 0.0),
     'Cruzat 2024 (Pediátrico / Alométrico)': lambda p, a, s, e: (5.46*(p/70.0), 55.6*(p/70.0), 231.0*(p/70.0), 0.51*((p/70.0)**0.75), 9.55*((p/70.0)**0.75), 2.10*((p/70.0)**0.75)),
+    
+    # Remifentanilo
     'Egan 1996 (Fijo)': lambda p, a, s, e: (7.6, 9.4, 4.7, 2.92, 1.95, 0.10),
     'Rigby-Jones 2007 (Pediátrico / Alométrico)': lambda p, a, s, e: (0.963*(p/10.5), 1.480*(p/10.5), 0.0, 0.716*((p/10.5)**0.75), 0.840*((p/10.5)**0.75), 0.0),
     'Staschen 2013 (Pediátrico / Alométrico dependiente de peso)': lambda p, a, s, e: (1.44*((p/14.6)**0.81), 3.02*((p/14.6)**0.74), 0.0, 1.09*((p/14.6)**(1.32*(p**-0.20))), 0.63*((p/14.6)**0.70), 0.0),
@@ -681,6 +755,8 @@ PK_DISPATCHER = {
     'La Colla 2009 (Masa libre de grasa y Edad)': _lacolla,
     'Kim-Obara-Egan 2017 (Alométrico y Edad)': _kim,
     'Eleveld 2017 (Propósito General / Alométrico, Edad y Sexo)': _eleveld,
+    
+    # Ketamina
     'Clements125 1981 (Peso Corporal Total)': lambda p, a, s, e: (1.202*p, 2.114*p, 0.0, 0.0166*p, 0.0263*p, 0.0),
     'Clements250 1981 (Peso Corporal Total)': lambda p, a, s, e: (1.70*p, 2.40*p, 0.0, 0.0191*p, 0.0317*p, 0.0),
     'Domino 1982 (Fijo)': lambda p, a, s, e: (3.47, 11.0, 134.0, 1.296, 2.276, 2.058),
@@ -718,17 +794,21 @@ def get_pk_params(farmaco, modelo_pk, ke0_tpeak_str, peso, altura, sexo, edad):
         if '0.710' in ke0_tpeak_str: ke0 = 0.710
         elif 'Abad' in ke0_tpeak_str: ke0 = 0.120
         elif 'Egan' in ke0_tpeak_str: ke0 = 0.433
+        elif 'Minto' in ke0_tpeak_str: ke0 = max(0.01, 0.595 - 0.007 * (edad - 40))
         elif 'Eleveld' in ke0_tpeak_str: ke0 = max(0.01, 1.09 * float(np.exp(-0.0289 * (edad - 35.0))))
+        elif 'Anderson' in ke0_tpeak_str: ke0 = max(0.01, float(np.log(2.0)) / (1.16 * ((max(1.0, peso) / 70.0) ** 0.25)))
         elif 'Pediátrico' in modelo_pk and 'Propósito General' not in modelo_pk: ke0 = 0.0
         else: ke0 = max(0.01, 0.595 - 0.007 * (edad - 40))
     else:  # Fentanilo
-        if '0.280' in ke0_tpeak_str: ke0 = 0.280
-        elif '0.410' in ke0_tpeak_str: ke0 = 0.410
-        elif '1 min' in ke0_tpeak_str: ke0 = calcular_ke0_para_tpeak(k10, k12, k21, k13, k31, 1.0, default_ke0=0.410)
-        elif 'Pediátrico' in modelo_pk and 'Propósito General' not in modelo_pk: ke0 = 0.0
+        if '0.174' in ke0_tpeak_str: ke0 = 0.174
+        elif '0.147' in ke0_tpeak_str: ke0 = 0.147
         elif '0.108' in ke0_tpeak_str: ke0 = 0.108
         elif '0.105' in ke0_tpeak_str: ke0 = 0.105
+        elif '0.280' in ke0_tpeak_str: ke0 = 0.280
+        elif '0.410' in ke0_tpeak_str: ke0 = 0.410
         elif '4 min' in ke0_tpeak_str: ke0 = calcular_ke0_para_tpeak(k10, k12, k21, k13, k31, 4.0, default_ke0=0.147)
+        elif '1 min' in ke0_tpeak_str: ke0 = calcular_ke0_para_tpeak(k10, k12, k21, k13, k31, 1.0, default_ke0=0.410)
+        elif 'Pediátrico' in modelo_pk and 'Propósito General' not in modelo_pk: ke0 = 0.0
         else: ke0 = 0.147
 
     return k10, k12, k21, k13, k31, ke0, V1, V2, V3
