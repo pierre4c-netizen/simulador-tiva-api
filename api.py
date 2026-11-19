@@ -95,6 +95,8 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
         pd_arrays['PaCO2 (Mildh 2001)'] = (40.503 + (3.915 * Ce)).tolist()
         pd_arrays['Indice NoL con Sevoflurano CAM 1 (Cruzat 2024)'] = FarmacoMatematica.cruzat_2024_nol(Ce).tolist()
         pd_arrays['BIS (Jeleazcov 2008)'] = FarmacoMatematica.jeleazcov_2008_bis(0.0, 0.0, Ce).tolist()
+        pd_arrays['BIS (Wiczling 2016)'] = FarmacoMatematica.wiczling_2016_bis(0.0, Ce).tolist()
+        pd_arrays['BIS (Bienert 2020)'] = FarmacoMatematica.bienert_2020_bis(0.0, Ce).tolist()
     elif datos.farmaco == 'Ketamina':
         pd_arrays['Analgesia Nociception Index (ANI) (Navarrete 2025)'] = FarmacoMatematica.ketamina_pd(Ce, 'Analgesia Nociception Index (ANI) (Navarrete 2025)').tolist()
         pd_arrays['Frecuencia Mediana EEG (Schüttler 1987)'] = FarmacoMatematica.ketamina_pd(Cp, 'Frecuencia Mediana EEG (Schüttler 1987)').tolist()
@@ -168,6 +170,8 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             isobolas_tmp['Propofol Tolerancia LMA ΔANI < 20% (Wang 2026)'] = {'ce_50': FarmacoMatematica.wang_2026_iso_cm(c_y, 9.77, 0.50), 'ce_95': FarmacoMatematica.wang_2026_iso_cm(c_y, 9.77, 0.95), 'base_50': 9.77, 'base_95': 9.77, 'unit': 'ug/ml'}
             isobolas_tmp['Sevoflurano Tolerancia LMA ΔANI < 20% (Wang 2026)'] = {'ce_50': FarmacoMatematica.wang_2026_iso_cm(c_y, 4.29, 0.50), 'ce_95': FarmacoMatematica.wang_2026_iso_cm(c_y, 4.29, 0.95), 'base_50': 4.29, 'base_95': 4.29, 'unit': '%'}
             isobolas_tmp['Propofol BIS (Jeleazcov 2008)'] = {'ce_50': FarmacoMatematica.jeleazcov_2008_iso_cprop(c_y, 60.0, 'Fentanilo'), 'ce_95': FarmacoMatematica.jeleazcov_2008_iso_cprop(c_y, 40.0, 'Fentanilo'), 'base_50': FarmacoMatematica.jeleazcov_2008_iso_cprop(0.0, 60.0, 'Fentanilo'), 'base_95': FarmacoMatematica.jeleazcov_2008_iso_cprop(0.0, 40.0, 'Fentanilo'), 'unit': 'ug/ml'}
+            isobolas_tmp['Propofol BIS (Wiczling 2016)'] = {'ce_50': FarmacoMatematica.wiczling_2016_iso_cprop(c_y, 60.0), 'ce_95': FarmacoMatematica.wiczling_2016_iso_cprop(c_y, 40.0), 'base_50': FarmacoMatematica.wiczling_2016_iso_cprop(0.0, 60.0), 'base_95': FarmacoMatematica.wiczling_2016_iso_cprop(0.0, 40.0), 'unit': 'ug/ml'}
+            isobolas_tmp['Propofol BIS (Bienert 2020)'] = {'ce_50': FarmacoMatematica.bienert_2020_iso_cprop(c_y, 60.0), 'ce_95': FarmacoMatematica.bienert_2020_iso_cprop(c_y, 40.0), 'base_50': FarmacoMatematica.bienert_2020_iso_cprop(0.0, 60.0), 'base_95': FarmacoMatematica.bienert_2020_iso_cprop(0.0, 40.0), 'unit': 'ug/ml'}
         
         elif datos.farmaco == 'Remifentanilo':
             # JONKMAN SENTIDO 1: Fármaco Principal Remifentanilo -> Despeja Ketamina
@@ -242,6 +246,8 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
     if datos.isobolograma_2d not in ["Ninguno", "Ninguna"] and datos.isobolograma_2d in isobolas_tmp and datos.tipo_grafico_iso != "Clásico":
         req_dict = isobolas_tmp[datos.isobolograma_2d]
         ce_dinamico = Ce
+        req50_arr = np.full_like(ce_dinamico, np.nan)
+        req95_arr = np.full_like(ce_dinamico, np.nan)
         
         if datos.farmaco == 'Fentanilo':
             if 'Smith 1994' in datos.isobolograma_2d:
@@ -268,6 +274,12 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             elif 'Jeleazcov 2008' in datos.isobolograma_2d:
                 req50_arr = FarmacoMatematica.jeleazcov_2008_iso_cprop(ce_dinamico, 60.0, 'Fentanilo')
                 req95_arr = FarmacoMatematica.jeleazcov_2008_iso_cprop(ce_dinamico, 40.0, 'Fentanilo')
+            elif 'Wiczling 2016' in datos.isobolograma_2d:
+                req50_arr = FarmacoMatematica.wiczling_2016_iso_cprop(ce_dinamico, 60.0)
+                req95_arr = FarmacoMatematica.wiczling_2016_iso_cprop(ce_dinamico, 40.0)
+            elif 'Bienert 2020' in datos.isobolograma_2d:
+                req50_arr = FarmacoMatematica.bienert_2020_iso_cprop(ce_dinamico, 60.0)
+                req95_arr = FarmacoMatematica.bienert_2020_iso_cprop(ce_dinamico, 40.0)
         
         elif datos.farmaco == 'Remifentanilo':
             if 'Jonkman' in datos.isobolograma_2d:
@@ -338,7 +350,15 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                 f_str = 'Propofol' if is_prop else 'Sevoflurano'
                 bis50_arr, bis95_arr, lbl_eeg = None, None, "BIS"
                 
-                if 'Jeleazcov 2008' in datos.isobolograma_2d or 'Jeleazcov' in datos.tipo_grafico_iso:
+                if datos.farmaco == 'Fentanilo' and is_prop and ('Wiczling' in datos.tipo_grafico_iso or ('Wiczling 2016' in datos.isobolograma_2d and not any(m in datos.tipo_grafico_iso for m in ['Jeleazcov', 'Bienert']))):
+                    bis50_arr = FarmacoMatematica.wiczling_2016_bis(req50_arr, ce_dinamico)
+                    bis95_arr = FarmacoMatematica.wiczling_2016_bis(req95_arr, ce_dinamico)
+                    lbl_eeg = "BIS"
+                elif datos.farmaco == 'Fentanilo' and is_prop and ('Bienert' in datos.tipo_grafico_iso or ('Bienert 2020' in datos.isobolograma_2d and not any(m in datos.tipo_grafico_iso for m in ['Jeleazcov', 'Wiczling']))):
+                    bis50_arr = FarmacoMatematica.bienert_2020_bis(req50_arr, ce_dinamico)
+                    bis95_arr = FarmacoMatematica.bienert_2020_bis(req95_arr, ce_dinamico)
+                    lbl_eeg = "BIS"
+                elif 'Jeleazcov 2008' in datos.isobolograma_2d or 'Jeleazcov' in datos.tipo_grafico_iso:
                     if datos.farmaco == 'Remifentanilo':
                         bis50_arr = FarmacoMatematica.jeleazcov_2008_bis(req50_arr, ce_dinamico, 0.0)
                         bis95_arr = FarmacoMatematica.jeleazcov_2008_bis(req95_arr, ce_dinamico, 0.0)
@@ -379,8 +399,10 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                     curvas.append({"nombre": f"{lbl_eeg} si Req. 95%", "color": "#00acc1", "es_linea_punteada": False, "es_eje_secundario": True, "es_area": False, "datos": clean_arr(bis95_arr)})
 
         elif 'Ahorro' in datos.tipo_grafico_iso:
-            ahorro_50 = (1.0 - req50_arr / req_dict['base_50']) * 100.0 if req_dict['base_50'] > 0 else np.zeros_like(ce_dinamico)
-            ahorro_95 = (1.0 - req95_arr / req_dict['base_95']) * 100.0 if req_dict['base_95'] > 0 else np.zeros_like(ce_dinamico)
+            b50_ok = (not np.isnan(req_dict['base_50'])) and (req_dict['base_50'] > 0)
+            b95_ok = (not np.isnan(req_dict['base_95'])) and (req_dict['base_95'] > 0)
+            ahorro_50 = (1.0 - req50_arr / req_dict['base_50']) * 100.0 if b50_ok else np.zeros_like(ce_dinamico)
+            ahorro_95 = (1.0 - req95_arr / req_dict['base_95']) * 100.0 if b95_ok else np.zeros_like(ce_dinamico)
             curvas.append({"nombre": "Ahorro 50% (%)", "color": "#ba68c8", "es_linea_punteada": True, "es_eje_secundario": False, "es_area": False, "datos": clean_arr(ahorro_50)})
             curvas.append({"nombre": "Ahorro 95% (%)", "color": "#7b1fa2", "es_linea_punteada": False, "es_eje_secundario": False, "es_area": False, "datos": clean_arr(ahorro_95)})
 
@@ -388,7 +410,7 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
             is_95 = '95%' in datos.tipo_grafico_iso
             req_arr = req95_arr if is_95 else req50_arr
             base_val = req_dict['base_95'] if is_95 else req_dict['base_50']
-            if base_val > 0:
+            if (not np.isnan(base_val)) and (base_val > 0):
                 ahorro_arr = np.clip((1.0 - req_arr / base_val) * 100.0, 0, 100)
             else:
                 ahorro_arr = np.zeros_like(ce_dinamico)
@@ -409,7 +431,7 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
         is_prop = 'Propofol' in datos.modelo_3d
         if datos.farmaco == 'Fentanilo':
             y_max = 10.0
-            x_max = 15.0 if 'Jeleazcov 2008' in datos.modelo_3d else (30.0 if is_prop else 8.0)
+            x_max = 15.0 if any(k in datos.modelo_3d for k in ['Jeleazcov 2008', 'Wiczling 2016', 'Bienert 2020']) else (30.0 if is_prop else 8.0)
             ylab = 'Ce Fentanilo (ng/ml)'
             xlab = 'Ce Propofol (ug/ml)' if is_prop else 'etSEV (%)'
             zlab = datos.modelo_3d
@@ -458,6 +480,10 @@ def calcular_simulacion_completa(datos: PeticionSimulacion) -> Dict[str, Any]:
                 Z = FarmacoMatematica.wang_2026_prob(X, Y, 9.77 if is_prop else 4.29, True)
             elif 'Jeleazcov 2008' in datos.modelo_3d:
                 Z = FarmacoMatematica.jeleazcov_2008_bis(X, 0.0, Y)
+            elif 'Wiczling 2016' in datos.modelo_3d:
+                Z = FarmacoMatematica.wiczling_2016_bis(X, Y)
+            elif 'Bienert 2020' in datos.modelo_3d:
+                Z = FarmacoMatematica.bienert_2020_bis(X, Y)
         elif datos.farmaco == 'Remifentanilo':
             if 'Bouillon 2004' in datos.modelo_3d:
                 if 'BIS' in datos.modelo_3d: Z = FarmacoMatematica.bouillon_2004_bis(X, Y)
